@@ -1,0 +1,90 @@
+name: 'AM Build Vars'
+description: >-
+  Read per-repository build variables from a committed am-build-vars.yml file and
+  expose them to the rest of the job as environment variables and step outputs, with
+  inline fleet-wide defaults for any key the repository does not override. Lets one
+  byte-identical managed workflow produce different results per repository.
+author: 'dawg-io'
+
+branding:
+  icon: 'sliders'
+  color: 'purple'
+
+inputs:
+  config-file:
+    description: >-
+      Path to the per-repository build variables file, relative to the workspace root
+      (absolute paths are also accepted). The file is optional: if it does not exist the
+      action succeeds using the values from the 'defaults' input alone. The repository
+      must already be checked out - run actions/checkout before this action.
+    required: false
+    default: 'am-build-vars.yml'
+  defaults:
+    description: >-
+      Fleet-wide default values as a YAML mapping, using the same syntax as the config
+      file (JSON is also accepted, since JSON is valid YAML). A key from the config file
+      always overrides the same key here; keys absent from the config file fall back to
+      this value. Precedence is per top-level key - values are replaced, not deep-merged.
+      Example: "node_version: \"20\"\nrunner: ubuntu-latest".
+    required: false
+    default: ''
+  export-env:
+    description: >-
+      Whether to write every resolved key into $GITHUB_ENV so later steps in the same job
+      can read it as ${{ env.KEY }}. Set to 'false' to leave the job environment untouched
+      and consume values through the 'json' output only. Note that exported names overwrite
+      any existing environment variable of the same name.
+    required: false
+    default: 'true'
+  fail-on-missing:
+    description: >-
+      Whether to fail the step when the config file does not exist. Defaults to 'false',
+      which is the normal mode: a repository with no am-build-vars.yml simply gets the
+      fleet-wide defaults. Set to 'true' to require every repository to carry the file.
+    required: false
+    default: 'false'
+
+outputs:
+  json:
+    description: >-
+      All resolved key/value pairs as a compact JSON object. Read individual values with
+      ${{ fromJSON(steps.<id>.outputs.json).my_key }}, or pass the whole object to another
+      job as a job output. Values that were lists or mappings in YAML are themselves JSON,
+      so they need a second fromJSON() at the point of use.
+    value: ${{ steps.resolve.outputs.json }}
+  keys:
+    description: >-
+      The names of all resolved keys as a sorted JSON array of strings. Useful for
+      debugging and for asserting that a repository defined the keys a workflow expects.
+    value: ${{ steps.resolve.outputs.keys }}
+  config-file-used:
+    description: >-
+      The workspace-relative path of the config file that was actually read, or an empty
+      string when no config file existed and only the inline defaults were applied.
+    value: ${{ steps.resolve.outputs.config-file-used }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check runner prerequisites
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo "::error::am-build-vars requires python3 on the runner PATH. It is preinstalled on all GitHub-hosted ubuntu and macOS runner images; on a self-hosted runner, install Python 3 or use actions/setup-python before this step."
+          exit 1
+        fi
+        if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+          echo "::error::am-build-vars requires the PyYAML module for python3. It is preinstalled on all GitHub-hosted ubuntu and macOS runner images; on a self-hosted runner, install it with 'python3 -m pip install --user pyyaml'."
+          exit 1
+        fi
+
+    - name: Resolve build variables
+      id: resolve
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/scripts/resolve.py"
+      env:
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
+        INPUT_DEFAULTS: ${{ inputs.defaults }}
+        INPUT_EXPORT_ENV: ${{ inputs.export-env }}
+        INPUT_FAIL_ON_MISSING: ${{ inputs.fail-on-missing }}

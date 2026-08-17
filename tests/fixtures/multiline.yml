@@ -1,0 +1,6 @@
+# Fixture: values containing newlines and shell metacharacters.
+release_notes: |
+  First line
+  Second line with "quotes" and $DOLLAR
+  Third line
+tricky: 'a`b$(c)d;e&f|g'

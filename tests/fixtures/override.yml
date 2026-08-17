@@ -1,0 +1,2 @@
+# Fixture: overrides exactly one key. Everything else must come from the defaults input.
+node_version: "24"

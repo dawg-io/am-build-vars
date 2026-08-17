@@ -1,0 +1,294 @@
+name: Test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: action.yml metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: action.yml parses as third-party action metadata
+        run: |
+          python3 - <<'PY'
+          import sys, yaml
+
+          with open("action.yml", encoding="utf-8") as fh:
+              meta = yaml.safe_load(fh)
+
+          errors = []
+          for field in ("name", "description", "runs"):
+              if not meta.get(field):
+                  errors.append("missing top-level '{}'".format(field))
+
+          runs = meta.get("runs") or {}
+          if runs.get("using") != "composite":
+              errors.append("runs.using must be 'composite', found {!r}".format(runs.get("using")))
+          if not runs.get("steps"):
+              errors.append("runs.steps is empty")
+          for step in runs.get("steps") or []:
+              if "run" in step and not step.get("shell"):
+                  errors.append("composite run step {!r} has no shell".format(step.get("name")))
+
+          # ActionsManager's step picker parses these to pre-fill the with: block,
+          # so every input and output must carry a usable description.
+          for section in ("inputs", "outputs"):
+              entries = meta.get(section) or {}
+              if not entries:
+                  errors.append("no {} declared".format(section))
+              for key, spec in entries.items():
+                  if not isinstance(spec, dict):
+                      errors.append("{}.{} is not a mapping".format(section, key))
+                      continue
+                  if not (spec.get("description") or "").strip():
+                      errors.append("{}.{} has no description".format(section, key))
+                  if section == "inputs" and "default" not in spec and not spec.get("required"):
+                      errors.append("{}.{} is neither required nor defaulted".format(section, key))
+                  if section == "outputs" and not (spec.get("value") or "").strip():
+                      errors.append("outputs.{} has no value expression".format(key))
+
+          if errors:
+              for err in errors:
+                  print("::error file=action.yml::{}".format(err))
+              sys.exit(1)
+          print("action.yml OK: {} inputs, {} outputs".format(
+              len(meta.get("inputs") or {}), len(meta.get("outputs") or {})))
+          PY
+
+      - name: Example config file is valid YAML
+        run: python3 -c "import yaml; yaml.safe_load(open('am-build-vars.example.yml'))"
+
+  resolver:
+    name: Resolver unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/local-test.sh
+
+  action:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- 1. config file present -----------------------------------------
+      - name: Config file present
+        id: present
+        uses: ./
+        with:
+          config-file: tests/fixtures/basic.yml
+          defaults: |
+            node_version: "18"
+            unused_default: from-defaults
+
+      - name: Assert config file present
+        env:
+          JSON: ${{ steps.present.outputs.json }}
+          KEYS: ${{ steps.present.outputs.keys }}
+          USED: ${{ steps.present.outputs.config-file-used }}
+          FROM_JSON: ${{ fromJSON(steps.present.outputs.json).node_version }}
+          MATRIX: ${{ fromJSON(steps.present.outputs.json).test_matrix }}
+        run: |
+          set -euo pipefail
+          assert() { [ "$2" = "$3" ] || { echo "::error::$1: expected '$3', got '$2'"; exit 1; }; }
+          # File value wins over the inline default.
+          assert "fromJSON node_version" "$FROM_JSON" "20"
+          # Keys absent from the file still come from the defaults.
+          assert "json unused_default" "$(echo "$JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["unused_default"])')" "from-defaults"
+          # Lists arrive as JSON, ready for a second fromJSON().
+          assert "test_matrix json" "$MATRIX" "[18,20,24]"
+          assert "config-file-used" "$USED" "tests/fixtures/basic.yml"
+          assert "keys" "$KEYS" '["build_args","coverage_enabled","node_version","retries","runner","test_matrix","unused_default"]'
+          # And the same values reached the job environment.
+          assert "env node_version" "${node_version:-}" "20"
+          assert "env coverage_enabled" "${coverage_enabled:-}" "true"
+          assert "env build_args" "${build_args:-}" '{"target":"production","minify":true}'
+
+      # --- 2. default discovery at the repository root --------------------
+      - name: Stage a root config file
+        run: cp tests/fixtures/basic.yml am-build-vars.yml
+
+      - name: Default config path
+        id: discovered
+        uses: ./
+        with:
+          export-env: 'false'
+
+      - name: Assert default config path
+        env:
+          USED: ${{ steps.discovered.outputs.config-file-used }}
+          NODE: ${{ fromJSON(steps.discovered.outputs.json).node_version }}
+        run: |
+          set -euo pipefail
+          [ "$USED" = "am-build-vars.yml" ] || { echo "::error::expected am-build-vars.yml, got '$USED'"; exit 1; }
+          [ "$NODE" = "20" ] || { echo "::error::expected 20, got '$NODE'"; exit 1; }
+
+      - name: Unstage the root config file
+        if: always()
+        run: rm -f am-build-vars.yml
+
+      # --- 3. config file absent, defaults only ---------------------------
+      - name: Config file absent
+        id: absent
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          defaults: |
+            only_from_defaults: "yes"
+            absent_runner: ubuntu-22.04
+
+      - name: Assert config file absent
+        env:
+          USED: ${{ steps.absent.outputs.config-file-used }}
+          VALUE: ${{ fromJSON(steps.absent.outputs.json).only_from_defaults }}
+        run: |
+          set -euo pipefail
+          # A missing config file is success, not an error.
+          [ "$VALUE" = "yes" ] || { echo "::error::expected 'yes', got '$VALUE'"; exit 1; }
+          [ -z "$USED" ] || { echo "::error::config-file-used should be empty, got '$USED'"; exit 1; }
+          [ "${absent_runner:-}" = "ubuntu-22.04" ] || { echo "::error::default not exported"; exit 1; }
+
+      # --- 4. precedence ---------------------------------------------------
+      - name: Override precedence
+        id: precedence
+        uses: ./
+        with:
+          config-file: tests/fixtures/override.yml
+          defaults: |
+            node_version: "18"
+            kept_default: untouched
+
+      - name: Assert override precedence
+        env:
+          JSON: ${{ steps.precedence.outputs.json }}
+        run: |
+          set -euo pipefail
+          [ "$JSON" = '{"node_version":"24","kept_default":"untouched"}' ] \
+            || { echo "::error::unexpected json: $JSON"; exit 1; }
+          [ "${node_version:-}" = "24" ] || { echo "::error::env override failed"; exit 1; }
+
+      # --- 5. values containing newlines ----------------------------------
+      - name: Multi-line values
+        id: multiline
+        uses: ./
+        with:
+          config-file: tests/fixtures/multiline.yml
+
+      - name: Assert multi-line values
+        env:
+          NOTES: ${{ fromJSON(steps.multiline.outputs.json).release_notes }}
+          TRICKY: ${{ fromJSON(steps.multiline.outputs.json).tricky }}
+        run: |
+          set -euo pipefail
+          expected=$'First line\nSecond line with "quotes" and $DOLLAR\nThird line\n'
+          # Compare with a sentinel so the trailing newline is part of the comparison.
+          [ "${NOTES}X" = "${expected}X" ] || { echo "::error::release_notes did not round-trip"; exit 1; }
+          [ "${release_notes:-}X" = "${expected}X" ] || { echo "::error::release_notes env did not round-trip"; exit 1; }
+          [ "$TRICKY" = 'a`b$(c)d;e&f|g' ] || { echo "::error::metacharacters did not round-trip"; exit 1; }
+          [ "$(printf '%s' "$NOTES" | wc -l | tr -d ' ')" = "3" ] || { echo "::error::wrong line count"; exit 1; }
+
+      # --- 6. both .yml and .yaml present ---------------------------------
+      - name: Both .yml and .yaml present
+        id: dual
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/dual.yml
+
+      - name: Assert both-extensions failure
+        run: |
+          [ "${{ steps.dual.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure when both .yml and .yaml exist"; exit 1; }
+
+      # --- 7. malformed YAML ----------------------------------------------
+      - name: Malformed YAML
+        id: malformed
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/malformed.yml
+
+      - name: Assert malformed failure
+        run: |
+          [ "${{ steps.malformed.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on malformed YAML"; exit 1; }
+
+      # --- 8. reserved and invalid key names ------------------------------
+      - name: Reserved key name
+        id: reserved
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/reserved.yml
+
+      - name: Invalid key name
+        id: badkey
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/bad-key.yml
+
+      - name: Assert key-name failures
+        run: |
+          [ "${{ steps.reserved.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on reserved key"; exit 1; }
+          [ "${{ steps.badkey.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on invalid key name"; exit 1; }
+
+      # --- 9. fail-on-missing ----------------------------------------------
+      - name: Missing file with fail-on-missing
+        id: strict
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          fail-on-missing: 'true'
+
+      - name: Assert fail-on-missing
+        run: |
+          [ "${{ steps.strict.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure with fail-on-missing"; exit 1; }
+
+      # --- 10. export-env: false -------------------------------------------
+      - name: Export disabled
+        id: noexport
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          export-env: 'false'
+          defaults: |
+            never_exported: secret-ish
+
+      - name: Assert export disabled
+        env:
+          VALUE: ${{ fromJSON(steps.noexport.outputs.json).never_exported }}
+        run: |
+          set -euo pipefail
+          [ "$VALUE" = "secret-ish" ] || { echo "::error::output missing"; exit 1; }
+          [ -z "${never_exported:-}" ] || { echo "::error::value leaked into the environment"; exit 1; }
+
+  # The README claims macOS support; this is what keeps that claim honest.
+  # Push to main only, so PRs do not pay for macOS minutes.
+  macos-smoke:
+    name: macOS smoke test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: vars
+        uses: ./
+        with:
+          config-file: tests/fixtures/basic.yml
+      - env:
+          NODE: ${{ fromJSON(steps.vars.outputs.json).node_version }}
+        run: |
+          set -euo pipefail
+          [ "$NODE" = "20" ] || { echo "::error::expected 20, got '$NODE'"; exit 1; }
+          [ "${node_version:-}" = "20" ] || { echo "::error::env export failed on macOS"; exit 1; }
