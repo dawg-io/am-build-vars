@@ -20,6 +20,10 @@ jobs:
           python3 - <<'PY'
           import sys, yaml
 
+          # The two characters that open a workflow expression, assembled at runtime so
+          # this file never contains the literal sequence.
+          EXPR_OPEN = "$" + "{" * 2
+
           with open("action.yml", encoding="utf-8") as fh:
               meta = yaml.safe_load(fh)
 
@@ -47,8 +51,20 @@ jobs:
                   if not isinstance(spec, dict):
                       errors.append("{}.{} is not a mapping".format(section, key))
                       continue
-                  if not (spec.get("description") or "").strip():
+                  description = (spec.get("description") or "").strip()
+                  if not description:
                       errors.append("{}.{} has no description".format(section, key))
+                  # The runner evaluates expressions inside descriptions, so an
+                  # illustrative one written in prose is parsed as a live one and the
+                  # whole manifest fails to load. Only outputs.<name>.value may carry an
+                  # expression. EXPR_OPEN is built by concatenation for the same reason:
+                  # a literal occurrence here would be parsed inside this workflow.
+                  if EXPR_OPEN in description:
+                      errors.append(
+                          "{}.{} description contains a template expression; the runner "
+                          "evaluates it and fails to load action.yml. Write the expression "
+                          "without the surrounding braces.".format(section, key)
+                      )
                   if section == "inputs" and "default" not in spec and not spec.get("required"):
                       errors.append("{}.{} is neither required nor defaulted".format(section, key))
                   if section == "outputs" and not (spec.get("value") or "").strip():

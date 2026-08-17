@@ -31,9 +31,9 @@ inputs:
   export-env:
     description: >-
       Whether to write every resolved key into $GITHUB_ENV so later steps in the same job
-      can read it as ${{ env.KEY }}. Set to 'false' to leave the job environment untouched
-      and consume values through the 'json' output only. Note that exported names overwrite
-      any existing environment variable of the same name.
+      can read it as "env.KEY" in an expression, or as "$KEY" in a shell. Set to 'false' to
+      leave the job environment untouched and consume values through the 'json' output only.
+      Note that exported names overwrite any existing environment variable of the same name.
     required: false
     default: 'true'
   fail-on-missing:
@@ -47,10 +47,10 @@ inputs:
 outputs:
   json:
     description: >-
-      All resolved key/value pairs as a compact JSON object. Read individual values with
-      ${{ fromJSON(steps.<id>.outputs.json).my_key }}, or pass the whole object to another
-      job as a job output. Values that were lists or mappings in YAML are themselves JSON,
-      so they need a second fromJSON() at the point of use.
+      All resolved key/value pairs as a compact JSON object. Read individual values with an
+      expression such as "fromJSON(steps.<id>.outputs.json).my_key", or pass the whole object
+      to another job as a job output. Values that were lists or mappings in YAML are
+      themselves JSON, so they need a second fromJSON() at the point of use.
     value: ${{ steps.resolve.outputs.json }}
   keys:
     description: >-
