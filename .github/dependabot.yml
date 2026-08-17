@@ -1,0 +1,29 @@
+version: 2
+
+updates:
+  # The only external dependencies this repository has are the actions referenced
+  # with `uses:`. There is deliberately no package manifest — the action ships no
+  # npm, pip or bundler dependencies, and PyYAML comes from the runner image — so
+  # github-actions is the only ecosystem with anything to track here.
+  #
+  # A directory of "/" covers both .github/workflows/*.yml and the root action.yml,
+  # so any `uses:` added to the composite action later is picked up automatically.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+    groups:
+      # Minor and patch bumps arrive as a single PR; majors stay separate, because
+      # those are the ones that can change action inputs and need a real read.
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

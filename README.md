@@ -354,6 +354,11 @@ tests/local-test.sh    # runs the resolver against every fixture, no runner need
 runs the real composite action on a runner through every case above, including the
 expected failures.
 
+[`.github/dependabot.yml`](.github/dependabot.yml) keeps the actions referenced with
+`uses:` up to date, weekly. Minor and patch bumps are grouped into one PR; majors get
+their own. There is no other ecosystem configured because there is nothing else to track —
+the action ships no package dependencies, and PyYAML comes from the runner image.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
