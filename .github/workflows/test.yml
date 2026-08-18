@@ -306,6 +306,15 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+
+      # macOS runner images ship python3 but NOT PyYAML, so the action's documented
+      # macOS prerequisite has to be satisfied here exactly as a user would satisfy it.
+      # This is the recipe the README gives; if it stops working, the README is wrong.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - run: python3 -m pip install pyyaml
+
       - id: vars
         uses: ./
         with:

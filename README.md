@@ -13,7 +13,7 @@ workflow file can produce different results in every repository it is deployed t
       node_version: "20"
       runner: ubuntu-latest
 
-- uses: actions/setup-node@v4
+- uses: actions/setup-node@v7
   with:
     node-version: ${{ env.node_version }}
 ```
@@ -46,10 +46,25 @@ standalone in any repository.
 
 - **`actions/checkout` must run first.** This action reads a file from the workspace; it
   does not check out the repository itself.
-- `python3` with PyYAML on the runner. Both are preinstalled on all GitHub-hosted
-  `ubuntu-*` and `macos-*` images, so there is nothing to install. On a bare self-hosted
-  runner, add `actions/setup-python` or `pip install pyyaml` — the action fails with an
-  explicit message rather than a stack trace if either is missing.
+- `python3` with PyYAML on the runner. What that costs you depends on the runner:
+
+  | Runner | `python3` | PyYAML | You need to |
+  |---|---|---|---|
+  | `ubuntu-*` | preinstalled | preinstalled | nothing |
+  | `macos-*` | preinstalled | **not present** | install PyYAML first |
+  | self-hosted | varies | varies | install both |
+
+  On macOS, and on any self-hosted runner missing it, add this before the action:
+
+  ```yaml
+  - uses: actions/setup-python@v7
+    with:
+      python-version: '3.x'
+  - run: python3 -m pip install pyyaml
+  ```
+
+  The action checks both prerequisites up front and fails with an explicit message
+  naming what is missing, rather than a stack trace.
 - Windows runners are **not supported** in v1.
 
 No Node modules, no build step, no network access. The entire implementation is
@@ -95,7 +110,7 @@ steps:
         coverage_enabled: true
         test_command: npm test
 
-  - uses: actions/setup-node@v4
+  - uses: actions/setup-node@v7
     with:
       node-version: ${{ env.node_version }}
   - run: ${{ env.test_command }}
@@ -126,7 +141,7 @@ jobs:
             node_version: "20"
             test_command: npm test
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.node_version }}
       - run: npm ci
@@ -285,7 +300,7 @@ jobs:
       matrix:
         node: ${{ fromJSON(needs.config.outputs.test_matrix) }}
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
       - run: echo "coverage=${{ fromJSON(needs.config.outputs.vars).coverage_enabled }}"

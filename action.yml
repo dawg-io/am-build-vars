@@ -71,11 +71,11 @@ runs:
       run: |
         set -euo pipefail
         if ! command -v python3 >/dev/null 2>&1; then
-          echo "::error::am-build-vars requires python3 on the runner PATH. It is preinstalled on all GitHub-hosted ubuntu and macOS runner images; on a self-hosted runner, install Python 3 or use actions/setup-python before this step."
+          echo "::error::am-build-vars requires python3 on the runner PATH. It is preinstalled on GitHub-hosted ubuntu and macOS runner images; on a self-hosted runner, install Python 3 or use actions/setup-python before this step."
           exit 1
         fi
         if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-          echo "::error::am-build-vars requires the PyYAML module for python3. It is preinstalled on all GitHub-hosted ubuntu and macOS runner images; on a self-hosted runner, install it with 'python3 -m pip install --user pyyaml'."
+          echo "::error::am-build-vars requires the PyYAML module for python3. It is preinstalled on GitHub-hosted ubuntu runner images, but NOT on macOS runners or most self-hosted ones. Install it before this step, for example with actions/setup-python followed by 'python3 -m pip install pyyaml'."
           exit 1
         fi
 

@@ -27,9 +27,9 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - the guard step in action.yml catches this
     print(
-        "::error::am-build-vars requires PyYAML. Install it on this runner with "
-        "'python3 -m pip install --user pyyaml'. It is preinstalled on all "
-        "GitHub-hosted ubuntu and macOS runner images.",
+        "::error::am-build-vars requires PyYAML. It is preinstalled on GitHub-hosted "
+        "ubuntu runner images, but not on macOS runners or most self-hosted ones. "
+        "Install it before this step with 'python3 -m pip install pyyaml'.",
         flush=True,
     )
     sys.exit(1)
