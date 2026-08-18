@@ -5,7 +5,7 @@ A composite GitHub Action that reads per-repository build variables from a commi
 workflow file can produce different results in every repository it is deployed to.
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@v7
 - uses: dawg-io/am-build-vars@v1
   id: vars
   with:
@@ -65,7 +65,7 @@ The repository's `am-build-vars.yml` is the only source of values.
 
 ```yaml
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@v7
   - uses: dawg-io/am-build-vars@v1
 
   - run: echo "Building with Node $node_version"
@@ -85,7 +85,7 @@ syntax as the config file.
 
 ```yaml
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@v7
   - uses: dawg-io/am-build-vars@v1
     id: vars
     with:
@@ -119,7 +119,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dawg-io/am-build-vars@v1
         with:
           defaults: |
@@ -270,7 +270,7 @@ jobs:
       runner: ${{ fromJSON(steps.vars.outputs.json).runner }}
       test_matrix: ${{ fromJSON(steps.vars.outputs.json).test_matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dawg-io/am-build-vars@v1
         id: vars
         with:
@@ -353,6 +353,10 @@ tests/local-test.sh    # runs the resolver against every fixture, no runner need
 [`.github/workflows/test.yml`](.github/workflows/test.yml) is the authoritative suite — it
 runs the real composite action on a runner through every case above, including the
 expected failures.
+
+The macOS smoke job is skipped by default so pull requests do not pay for macOS minutes.
+Label a PR **`ci:macos`** to run it — worth doing for any change to runner-facing
+behaviour, since that job is what backs the macOS support claim above.
 
 [`.github/dependabot.yml`](.github/dependabot.yml) keeps the actions referenced with
 `uses:` up to date, weekly. Minor and patch bumps are grouped into one PR; majors get

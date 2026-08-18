@@ -4,6 +4,9 @@ on:
   push:
     branches: ['**']
   pull_request:
+    # 'labeled' is what lets the ci:macos gate below be reached from a PR.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,7 +16,7 @@ jobs:
     name: action.yml metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: action.yml parses as third-party action metadata
         run: |
@@ -85,14 +88,14 @@ jobs:
     name: Resolver unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: bash tests/local-test.sh
 
   action:
     name: End-to-end
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # --- 1. config file present -----------------------------------------
       - name: Config file present
@@ -291,13 +294,18 @@ jobs:
           [ -z "${never_exported:-}" ] || { echo "::error::value leaked into the environment"; exit 1; }
 
   # The README claims macOS support; this is what keeps that claim honest.
-  # Push to main only, so PRs do not pay for macOS minutes.
+  # Runs on push to main, on manual dispatch, and on any PR labelled 'ci:macos'
+  # so a change to runner-facing behaviour can be verified before it merges.
+  # Unlabelled PRs do not pay for macOS minutes.
   macos-smoke:
     name: macOS smoke test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'ci:macos')
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: vars
         uses: ./
         with:
