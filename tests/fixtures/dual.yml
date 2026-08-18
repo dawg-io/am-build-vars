@@ -1,0 +1,2 @@
+# Fixture: exists alongside dual.yaml so the action must refuse to guess. See dual.yaml.
+node_version: "20"

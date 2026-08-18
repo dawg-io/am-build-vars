@@ -1,0 +1,2 @@
+# Fixture: a key that is not a valid environment variable / JSON-addressable name.
+node-version: "20"

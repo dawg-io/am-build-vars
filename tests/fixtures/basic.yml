@@ -1,0 +1,9 @@
+# Fixture: a straightforward config file with one of every supported value shape.
+node_version: "20"
+runner: ubuntu-latest
+coverage_enabled: true
+retries: 3
+test_matrix: [18, 20, 24]
+build_args:
+  target: production
+  minify: true

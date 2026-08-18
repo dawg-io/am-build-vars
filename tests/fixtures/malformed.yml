@@ -1,0 +1,4 @@
+# Fixture: intentionally invalid YAML. The action must fail and name this file.
+node_version: "20
+runner: [ubuntu-latest
+  bad indentation: :
