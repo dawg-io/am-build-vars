@@ -7,16 +7,30 @@ workflow file can produce different results in every repository it is deployed t
 ```yaml
 - uses: actions/checkout@v7
 - uses: dawg-io/am-build-vars@v1
-  id: vars
   with:
     defaults: |
       node_version: "20"
-      runner: ubuntu-latest
 
-- uses: actions/setup-node@v7
-  with:
-    node-version: ${{ env.node_version }}
+- run: echo "Building with Node $node_version"
 ```
+
+## How it works
+
+1. A repository commits an `am-build-vars.yml` at its root.
+2. This action reads it, filling in any key the file does not define from the workflow's
+   inline `defaults`.
+3. **Every key becomes an environment variable with the same name**, for every later step
+   in the job.
+
+Step 3 is the whole interface. The key you write in the file *is* the variable name:
+
+| In `am-build-vars.yml` | In a shell step | In an expression |
+|---|---|---|
+| `node_version: "20"` | `$node_version` | `${{ env.node_version }}` |
+| `test_command: npm test` | `$test_command` | `${{ env.test_command }}` |
+| `coverage_enabled: true` | `$coverage_enabled` | `${{ env.coverage_enabled }}` |
+
+Same name, same case, no prefix. Nothing to declare up front, and the step needs no `id`.
 
 ## The problem it solves
 
@@ -102,7 +116,6 @@ syntax as the config file.
 steps:
   - uses: actions/checkout@v7
   - uses: dawg-io/am-build-vars@v1
-    id: vars
     with:
       defaults: |
         node_version: "20"
@@ -185,36 +198,19 @@ Same workflow file, byte for byte. Different builds.
 | `keys` | The resolved key names as a sorted JSON array. |
 | `config-file-used` | The path actually read, or `''` when only defaults were applied. |
 
-## Reading the values
+## When environment variables are not enough
 
-There are two ways, and you will normally use the first.
+Three cases the env export cannot cover. All three are GitHub Actions constraints, not
+choices this action makes.
 
-### 1. Environment variables (default)
+| Case | Why | Use |
+|---|---|---|
+| The same step that runs the action | `$GITHUB_ENV` only takes effect in *later* steps | the `json` output |
+| A different job | jobs do not share an environment | a config job (below) |
+| `runs-on`, `strategy.matrix` | evaluated before any step runs | a config job (below) |
 
-Every resolved key is written to `$GITHUB_ENV`, so any **later step in the same job** can
-read it:
-
-```yaml
-- run: echo "$node_version"          # in the shell
-- run: npm ci
-  if: env.coverage_enabled == 'true' # in an expression
-```
-
-The name in the environment is exactly the key from the YAML file — same case, no prefix.
-
-> ⚠️ **Exported names overwrite existing environment variables of the same name.** A key
-> called `HOME` or `EDITOR` in a config file will shadow the real one for the rest of the
-> job. Choose key names deliberately, or set `export-env: false` and use the `json` output.
-> Names owned by the runner (`GITHUB_*`, `ACTIONS_*`, `RUNNER_*`, `PATH`, `HOME`, `CI`,
-> `NODE_OPTIONS`, `LD_PRELOAD`) are rejected outright — the action fails rather than
-> breaking the job in a way that would be miserable to debug.
-
-### 2. The `json` output
-
-The composite action declares a fixed set of outputs, so arbitrary keys cannot appear as
-`steps.vars.outputs.<key>` — GitHub only surfaces outputs that are declared in
-`action.yml`, and your keys are not known until runtime. The whole map is exposed as one
-JSON object instead:
+For these, give the step an `id` and read the `json` output — every resolved key, as one
+JSON object:
 
 ```yaml
 - uses: dawg-io/am-build-vars@v1
@@ -222,17 +218,50 @@ JSON object instead:
 - run: echo "Node ${{ fromJSON(steps.vars.outputs.json).node_version }}"
 ```
 
-Use this when you need a value inside the same step that would otherwise have to wait for
-the environment export, or when you want to pass everything to another job.
+### Passing values to another job
 
-When interpolating a value into a shell script, prefer passing it through `env:` rather
-than inlining the expression — it keeps quoting sane and multi-line values intact:
+Put the verbose form in the config job's `outputs:` block once. Everything downstream is
+then a plain `needs.config.outputs.<key>`:
 
 ```yaml
-- env:
-    NOTES: ${{ fromJSON(steps.vars.outputs.json).release_notes }}
-  run: printf '%s' "$NOTES" > notes.txt
+jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ fromJSON(steps.vars.outputs.json).runner }}
+      test_matrix: ${{ fromJSON(steps.vars.outputs.json).test_matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dawg-io/am-build-vars@v1
+        id: vars
+        with:
+          defaults: |
+            runner: ubuntu-latest
+            test_matrix: ["20"]
+
+  build:
+    needs: config
+    runs-on: ${{ needs.config.outputs.runner }}
+    strategy:
+      matrix:
+        node: ${{ fromJSON(needs.config.outputs.test_matrix) }}
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
 ```
+
+`test_matrix` is unwrapped twice: once by the config job's output expression, once by
+`fromJSON` in `strategy.matrix`.
+
+> Passing a value into a shell script? Prefer `env:` over inlining the expression — it
+> keeps quoting sane and multi-line values intact:
+>
+> ```yaml
+> - env:
+>     NOTES: ${{ fromJSON(steps.vars.outputs.json).release_notes }}
+>   run: printf '%s' "$NOTES" > notes.txt
+> ```
 
 ## Structured values
 
@@ -268,46 +297,6 @@ strategy:
 
 > **Quote your version numbers.** YAML reads unquoted `20.10` as the float `20.1` and
 > unquoted `on`, `yes` and `no` as booleans. `"20.10"` gives you the string you meant.
-
-## Job-level values (`runs-on`, `strategy.matrix`)
-
-Step outputs and `$GITHUB_ENV` only exist inside the job that produced them, and
-`runs-on` / `strategy` are evaluated before any step runs. Cross-job sharing is
-deliberately **not** built into this action — the platform already has a mechanism, and
-wrapping it would only add a layer to debug. Use a small config job:
-
-```yaml
-jobs:
-  config:
-    runs-on: ubuntu-latest
-    outputs:
-      vars: ${{ steps.vars.outputs.json }}
-      runner: ${{ fromJSON(steps.vars.outputs.json).runner }}
-      test_matrix: ${{ fromJSON(steps.vars.outputs.json).test_matrix }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dawg-io/am-build-vars@v1
-        id: vars
-        with:
-          defaults: |
-            runner: ubuntu-latest
-            test_matrix: ["20"]
-
-  build:
-    needs: config
-    runs-on: ${{ needs.config.outputs.runner }}
-    strategy:
-      matrix:
-        node: ${{ fromJSON(needs.config.outputs.test_matrix) }}
-    steps:
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ matrix.node }}
-      - run: echo "coverage=${{ fromJSON(needs.config.outputs.vars).coverage_enabled }}"
-```
-
-Note `test_matrix` is unwrapped twice: once by the config job's output expression, once by
-`fromJSON` in `strategy.matrix`.
 
 ## Key naming
 
