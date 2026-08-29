@@ -24,7 +24,7 @@ run() {
   : >"$OUT_FILE"
   : >"$ENV_FILE"
   LOG="$(
-    GITHUB_WORKSPACE="$ROOT" \
+    GITHUB_WORKSPACE="${WS:-$ROOT}" \
     GITHUB_OUTPUT="$OUT_FILE" \
     GITHUB_ENV="$ENV_FILE" \
     INPUT_CONFIG_FILE="$1" \
@@ -105,7 +105,7 @@ run "tests/fixtures/nope.yml" $'node_version: "18"\nrunner: ubuntu-22.04\n'
 ok "exit status" "$STATUS" "0"
 ok "default applied" "$(get "$OUT_FILE" node_version)" "18"
 ok "config-file-used empty" "$(get "$OUT_FILE" config-file-used)" ""
-contains "log explains" "$LOG" "no config file at"
+contains "log explains" "$LOG" "no config file found"
 
 echo "3. precedence: file wins, untouched defaults survive"
 run "tests/fixtures/override.yml" $'node_version: "18"\nrunner: ubuntu-22.04\ncoverage_enabled: false\n'
@@ -115,11 +115,47 @@ ok "default survives (runner)" "$(get "$OUT_FILE" runner)" "ubuntu-22.04"
 ok "default survives (bool)" "$(get "$OUT_FILE" coverage_enabled)" "false"
 ok "json shape" "$(get "$OUT_FILE" json)" '{"node_version":"24","runner":"ubuntu-22.04","coverage_enabled":"false"}'
 
-echo "4. both .yml and .yaml present -> failure"
-run "tests/fixtures/dual.yml" ""
-ok "exit status" "$STATUS" "1"
-contains "names both files" "$LOG" "dual.yaml"
-contains "names both files" "$LOG" "dual.yml"
+echo "4. discovery: root, .github/, conflict, near-miss"
+# A scratch workspace per case, so discovery has a realistic tree to search.
+mkws() { WS="$WORK/ws.$RANDOM"; mkdir -p "$WS/.github"; }
+
+mkws; cp "$FIXTURES/basic.yml" "$WS/am-build-vars.yml"
+run "" ""
+ok "root: exit status" "$STATUS" "0"
+ok "root: value" "$(get "$OUT_FILE" node_version)" "20"
+ok "root: path reported" "$(get "$OUT_FILE" config-file-used)" "am-build-vars.yml"
+
+mkws; cp "$FIXTURES/basic.yml" "$WS/.github/am-build-vars.yml"
+run "" ""
+ok ".github: exit status" "$STATUS" "0"
+ok ".github: value" "$(get "$OUT_FILE" node_version)" "20"
+ok ".github: path reported" "$(get "$OUT_FILE" config-file-used)" ".github/am-build-vars.yml"
+
+mkws; cp "$FIXTURES/basic.yml" "$WS/am-build-vars.yml"
+cp "$FIXTURES/override.yml" "$WS/.github/am-build-vars.yml"
+run "" ""
+ok "two locations: exit status" "$STATUS" "1"
+contains "two locations: names both" "$LOG" ".github/am-build-vars.yml"
+contains "two locations: names both" "$LOG" "am-build-vars.yml"
+
+mkws; cp "$FIXTURES/wrong-ext.yaml" "$WS/am-build-vars.yaml"
+run "" ""
+ok "wrong extension: exit status" "$STATUS" "1"
+contains "wrong extension: names it" "$LOG" "am-build-vars.yaml"
+contains "wrong extension: says rename" "$LOG" "Rename it"
+
+mkws
+run "" $'node_version: "18"\n'
+ok "no file anywhere: exit status" "$STATUS" "0"
+ok "no file anywhere: defaults" "$(get "$OUT_FILE" node_version)" "18"
+ok "no file anywhere: path empty" "$(get "$OUT_FILE" config-file-used)" ""
+
+# An explicit config-file turns discovery off: a root file must be ignored.
+mkws; cp "$FIXTURES/override.yml" "$WS/am-build-vars.yml"
+run "$FIXTURES/basic.yml" ""
+ok "explicit path wins: exit status" "$STATUS" "0"
+ok "explicit path wins: value" "$(get "$OUT_FILE" node_version)" "20"
+unset WS
 
 echo "5. malformed YAML -> failure naming the file"
 run "tests/fixtures/malformed.yml" ""

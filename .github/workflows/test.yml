@@ -213,18 +213,58 @@ jobs:
           [ "$TRICKY" = 'a`b$(c)d;e&f|g' ] || { echo "::error::metacharacters did not round-trip"; exit 1; }
           [ "$(printf '%s' "$NOTES" | wc -l | tr -d ' ')" = "3" ] || { echo "::error::wrong line count"; exit 1; }
 
-      # --- 6. both .yml and .yaml present ---------------------------------
-      - name: Both .yml and .yaml present
-        id: dual
-        continue-on-error: true
+      # --- 6. discovery: .github/, two locations, wrong extension ---------
+      - name: Stage a .github config file
+        run: cp tests/fixtures/basic.yml .github/am-build-vars.yml
+
+      - name: Discover under .github
+        id: dotgithub
         uses: ./
         with:
-          config-file: tests/fixtures/dual.yml
+          export-env: 'false'
 
-      - name: Assert both-extensions failure
+      - name: Assert .github discovery
+        env:
+          USED: ${{ steps.dotgithub.outputs.config-file-used }}
+          NODE: ${{ fromJSON(steps.dotgithub.outputs.json).node_version }}
         run: |
-          [ "${{ steps.dual.outcome }}" = "failure" ] \
-            || { echo "::error::expected failure when both .yml and .yaml exist"; exit 1; }
+          set -euo pipefail
+          [ "$USED" = ".github/am-build-vars.yml" ] || { echo "::error::got '$USED'"; exit 1; }
+          [ "$NODE" = "20" ] || { echo "::error::got '$NODE'"; exit 1; }
+
+      - name: Stage a second copy at the root
+        run: cp tests/fixtures/override.yml am-build-vars.yml
+
+      - name: Config file in two locations
+        id: twoloc
+        continue-on-error: true
+        uses: ./
+
+      - name: Unstage both
+        if: always()
+        run: rm -f am-build-vars.yml .github/am-build-vars.yml
+
+      - name: Assert two-location failure
+        run: |
+          [ "${{ steps.twoloc.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure when the file exists in two locations"; exit 1; }
+
+      - name: Stage the wrong extension
+        run: cp tests/fixtures/wrong-ext.yaml am-build-vars.yaml
+
+      - name: Wrong extension
+        id: wrongext
+        continue-on-error: true
+        uses: ./
+
+      - name: Unstage the wrong extension
+        if: always()
+        run: rm -f am-build-vars.yaml
+
+      - name: Assert wrong-extension failure
+        run: |
+          [ "${{ steps.wrongext.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on am-build-vars.yaml"; exit 1; }
 
       # --- 7. malformed YAML ----------------------------------------------
       - name: Malformed YAML

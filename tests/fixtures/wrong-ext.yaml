@@ -1,0 +1,3 @@
+# Fixture: the .yaml spelling, which this action does not read. Staged into a
+# workspace by the tests to prove the near-miss is an error, not a silent skip.
+node_version: "20"

@@ -1,2 +1,0 @@
-# Fixture: exists alongside dual.yml so the action must refuse to guess. See dual.yml.
-node_version: "24"

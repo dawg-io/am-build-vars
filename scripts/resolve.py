@@ -34,6 +34,8 @@ except ImportError:  # pragma: no cover - the guard step in action.yml catches t
     )
     sys.exit(1)
 
+CONFIG_NAME = "am-build-vars.yml"
+
 KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RESERVED_PREFIXES = ("GITHUB_", "ACTIONS_", "RUNNER_")
 RESERVED_NAMES = ("PATH", "HOME", "CI", "NODE_OPTIONS", "LD_PRELOAD")
@@ -144,38 +146,56 @@ def main():
     if export_env and not github_env:
         fail("GITHUB_ENV is not set. This action must run inside GitHub Actions.")
 
-    if not config_input:
-        fail("The 'config-file' input must not be empty.")
-
     # --- defaults -----------------------------------------------------------
     defaults = load_mapping(defaults_input, "the 'defaults' input")
     for key in defaults:
         validate_key(key, "the 'defaults' input")
 
     # --- config file --------------------------------------------------------
-    config_path = config_input
-    if not os.path.isabs(config_path):
-        config_path = os.path.join(workspace, config_path)
-    config_path = os.path.normpath(config_path)
+    # One filename, several allowed homes. An explicit 'config-file' input turns
+    # discovery off entirely and uses exactly the path given.
+    if config_input:
+        candidates = [config_input]
+        explicit = True
+    else:
+        candidates = [CONFIG_NAME, os.path.join(".github", CONFIG_NAME)]
+        explicit = False
 
-    # A repo must not carry both spellings of the same config file: the choice of
-    # which one wins would be silent and arbitrary. This applies to whatever path
-    # is configured, not just the default one.
-    sibling = None
-    if config_path.endswith(".yml"):
-        sibling = config_path[: -len(".yml")] + ".yaml"
-    elif config_path.endswith(".yaml"):
-        sibling = config_path[: -len(".yaml")] + ".yml"
-    if sibling and os.path.isfile(config_path) and os.path.isfile(sibling):
-        first, second = sorted([config_path, sibling])
+    found = []
+    for candidate in candidates:
+        path = candidate
+        if not os.path.isabs(path):
+            path = os.path.join(workspace, path)
+        found.append((candidate, os.path.normpath(path)))
+
+    present = [(rel, path) for rel, path in found if os.path.isfile(path)]
+
+    # Two homes for the same file would make precedence silent and arbitrary.
+    if len(present) > 1:
         fail(
-            "Found both {} and {}. Keep exactly one of them and delete the "
-            "other.".format(os.path.relpath(first, workspace), os.path.relpath(second, workspace))
+            "Found {} in more than one location: {}. Keep exactly one and delete "
+            "the rest.".format(
+                CONFIG_NAME, ", ".join(rel for rel, _ in present)
+            )
         )
+
+    # A near-miss is worth an error rather than a silent fall-through to defaults:
+    # the repository plainly meant to configure something, and quietly building
+    # with fleet defaults instead is the confusing outcome.
+    if not present and not explicit:
+        for rel, path in found:
+            for wrong in (path[: -len(".yml")] + ".yaml", path + ".yaml"):
+                if os.path.isfile(wrong):
+                    fail(
+                        "Found {} but this action reads {} only. Rename it.".format(
+                            os.path.relpath(wrong, workspace), CONFIG_NAME
+                        )
+                    )
 
     file_values = {}
     config_file_used = ""
-    if os.path.isfile(config_path):
+    if present:
+        _, config_path = present[0]
         display = os.path.relpath(config_path, workspace)
         config_file_used = display
         try:
@@ -188,9 +208,8 @@ def main():
             validate_key(key, display)
     elif fail_on_missing:
         fail(
-            "Config file {} not found and 'fail-on-missing' is true.".format(
-                os.path.relpath(config_path, workspace)
-            )
+            "No config file found and 'fail-on-missing' is true. Looked for: "
+            "{}.".format(", ".join(rel for rel, _ in found))
         )
 
     # --- merge: file wins, per top-level key (no deep merge) -----------------
@@ -219,9 +238,8 @@ def main():
         print("am-build-vars: read {}".format(config_file_used))
     else:
         print(
-            "am-build-vars: no config file at {} (using defaults only)".format(
-                os.path.relpath(config_path, workspace)
-            )
+            "am-build-vars: no config file found (looked for {}); using defaults "
+            "only".format(", ".join(rel for rel, _ in found))
         )
     if rendered:
         print("am-build-vars: resolved {} key(s):".format(len(rendered)))
