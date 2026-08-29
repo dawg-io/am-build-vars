@@ -13,12 +13,14 @@ branding:
 inputs:
   config-file:
     description: >-
-      Path to the per-repository build variables file, relative to the workspace root
-      (absolute paths are also accepted). The file is optional: if it does not exist the
-      action succeeds using the values from the 'defaults' input alone. The repository
-      must already be checked out - run actions/checkout before this action.
+      Optional explicit path to the build variables file, relative to the workspace root
+      (absolute paths are also accepted). Leave empty to auto-discover am-build-vars.yml,
+      which is looked for in the repository root first and then in .github/ - setting this
+      input turns that discovery off and uses exactly the path given. The file is optional
+      either way: if none exists the action succeeds using the 'defaults' input alone. The
+      repository must already be checked out - run actions/checkout before this action.
     required: false
-    default: 'am-build-vars.yml'
+    default: ''
   defaults:
     description: >-
       Fleet-wide default values as a YAML mapping, using the same syntax as the config

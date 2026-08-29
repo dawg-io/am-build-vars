@@ -16,7 +16,8 @@ workflow file can produce different results in every repository it is deployed t
 
 ## How it works
 
-1. A repository commits an `am-build-vars.yml` at its root.
+1. A repository commits an `am-build-vars.yml` — in the repository root, or in
+   `.github/`. One filename, either home; the action finds it.
 2. This action reads it, filling in any key the file does not define from the workflow's
    inline `defaults`.
 3. **Every key becomes an environment variable with the same name**, for every later step
@@ -185,7 +186,7 @@ Same workflow file, byte for byte. Different builds.
 
 | Input | Default | Description |
 |---|---|---|
-| `config-file` | `am-build-vars.yml` | Path to the per-repo file, relative to the workspace root. Absolute paths are also accepted. |
+| `config-file` | `''` | Explicit path to the file, turning discovery off. Leave empty to search the root then `.github/`. |
 | `defaults` | `''` | Fleet-wide defaults as a YAML mapping. Applied to any key the config file does not define. |
 | `export-env` | `'true'` | Write every resolved key to `$GITHUB_ENV`. Set `'false'` to leave the job environment untouched. |
 | `fail-on-missing` | `'false'` | Fail the step when the config file is absent, instead of falling back to defaults only. |
@@ -313,9 +314,11 @@ The action fails, with a message naming the file, when:
 
 - the YAML is malformed (the parser's line and column are included);
 - the top level of the file or of `defaults` is not a mapping;
-- both `am-build-vars.yml` and `am-build-vars.yaml` exist — the action refuses to pick one
-  silently. This check applies to whatever `config-file` you configure, comparing it
-  against its sibling extension;
+- `am-build-vars.yml` exists in **both** the root and `.github/` — the action refuses to
+  pick one silently;
+- an `am-build-vars.yaml` exists and no `.yml` does. Only `.yml` is read, and quietly
+  building with fleet defaults instead of the config you wrote is the worse outcome, so
+  this is an error telling you to rename it;
 - a key is not a valid name, or collides with a runner-owned variable;
 - `fail-on-missing: true` and the file is absent.
 

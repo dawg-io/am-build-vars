@@ -1,8 +1,10 @@
 # am-build-vars.yml — per-repository build variables.
 #
-# Copy this file to the root of a repository as `am-build-vars.yml` and edit the
-# values. The managed workflow stays byte-identical across every repository; this
-# file is what makes this repository build differently.
+# Copy this file into a repository as `am-build-vars.yml` — either at the root or
+# in `.github/` — and edit the values. The managed workflow stays byte-identical
+# across every repository; this file is what makes this repository build
+# differently. The name is always `am-build-vars.yml`: `.yaml` is not read, and
+# having it in both locations is an error rather than a silent coin flip.
 #
 # Rules:
 #   * Top-level keys only. Keys must match [A-Za-z_][A-Za-z0-9_]* — use underscores,
