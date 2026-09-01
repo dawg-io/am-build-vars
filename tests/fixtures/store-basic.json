@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "scope": "main",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "values": {
+    "image_tag": "sha-abc1234",
+    "node_version": "22"
+  },
+  "origins": {
+    "image_tag": {"run_id": "100", "workflow": "Build", "sha": "abc1234", "at": "2026-01-01T00:00:00Z"},
+    "node_version": {"run_id": "100", "workflow": "Build", "sha": "abc1234", "at": "2026-01-01T00:00:00Z"}
+  }
+}

@@ -18,6 +18,11 @@ FAIL=0
 
 # run <config-file> <defaults> [export-env] [fail-on-missing]
 # Populates OUT_FILE / ENV_FILE / LOG / STATUS for the assertions below.
+#
+# The sharing inputs arrive through optional shell variables rather than more
+# positional arguments -- SHARE, SHARE_ENV, LOAD_SHARED, SHARE_SCOPE, STORE_IN,
+# STORE_OUT and STORE_RUN_ID. Call reset_share before setting them, the way the
+# discovery cases below call mkws.
 run() {
   OUT_FILE="$WORK/output.$RANDOM"
   ENV_FILE="$WORK/env.$RANDOM"
@@ -31,6 +36,14 @@ run() {
     INPUT_DEFAULTS="${2:-}" \
     INPUT_EXPORT_ENV="${3:-true}" \
     INPUT_FAIL_ON_MISSING="${4:-false}" \
+    INPUT_SHARE="${SHARE:-}" \
+    INPUT_SHARE_ENV="${SHARE_ENV:-}" \
+    INPUT_LOAD_SHARED="${LOAD_SHARED:-false}" \
+    INPUT_SHARE_SCOPE="${SHARE_SCOPE:-main}" \
+    GITHUB_RUN_ID="${RUN_ID:-4242}" \
+    AM_BUILD_VARS_STORE_IN="${STORE_IN:-}" \
+    AM_BUILD_VARS_STORE_OUT="${STORE_OUT:-}" \
+    AM_BUILD_VARS_STORE_RUN_ID="${STORE_RUN_ID:-}" \
     python3 "$ROOT/scripts/resolve.py" 2>&1
   )"
   STATUS=$?
@@ -59,6 +72,34 @@ while i < len(lines):
     i += 1
 sys.exit(1)
 PY
+}
+
+reset_share() {
+  unset SHARE SHARE_ENV LOAD_SHARED SHARE_SCOPE STORE_IN STORE_OUT STORE_RUN_ID RUN_ID
+}
+
+# stored <dir> <expr> — read something out of a store file the resolver wrote.
+stored() {
+  python3 - "$1/am-build-vars-store.json" "$2" <<'PY'
+import json, sys
+store = json.load(open(sys.argv[1], encoding="utf-8"))
+print(eval(sys.argv[2], {"store": store, "sorted": sorted, "len": len}))
+PY
+}
+
+# choose <artifact-name> <current-run-id> — the id choose_artifact settles on.
+choose() {
+  PYTHONPATH="$ROOT/scripts" python3 - "$FIXTURES/artifacts-list.json" "$1" "$2" <<'PY'
+import json, sys, store
+artifacts = json.load(open(sys.argv[1], encoding="utf-8"))["artifacts"]
+picked = store.choose_artifact(artifacts, sys.argv[2], sys.argv[3])
+print("" if picked is None else picked["id"])
+PY
+}
+
+# name <scope> — the artifact name a scope maps to.
+name() {
+  PYTHONPATH="$ROOT/scripts" python3 -c "import common,sys; print(common.artifact_name(sys.argv[1]))" "$1"
 }
 
 ok() {
@@ -211,6 +252,145 @@ echo "13. empty config file is not an error"
 run "$WORK/empty.yml" $'node_version: "20"\n'
 ok "exit status" "$STATUS" "0"
 ok "defaults still apply" "$(get "$OUT_FILE" node_version)" "20"
+
+echo "14. shared store: applied over the defaults, under the config file"
+reset_share
+LOAD_SHARED=true STORE_IN="$FIXTURES/store-basic.json" STORE_RUN_ID=100
+run "$FIXTURES/override.yml" $'node_version: "18"\nimage_tag: from-default\nrunner: ubuntu-22.04\n'
+ok "exit status" "$STATUS" "0"
+# The committed file outranks the store, so a pinned key stays pinned.
+ok "file beats shared" "$(get "$OUT_FILE" node_version)" "24"
+# ...and the store outranks the inline default.
+ok "shared beats default" "$(get "$OUT_FILE" image_tag)" "sha-abc1234"
+ok "untouched default survives" "$(get "$OUT_FILE" runner)" "ubuntu-22.04"
+ok "shared key exported to env" "$(get "$ENV_FILE" image_tag)" "sha-abc1234"
+ok "sources" "$(get "$OUT_FILE" sources)" \
+  '{"image_tag":"shared","node_version":"file","runner":"default"}'
+ok "shared-json is the shared layer alone" "$(get "$OUT_FILE" shared-json)" \
+  '{"image_tag":"sha-abc1234","node_version":"22"}'
+ok "provenance" "$(get "$OUT_FILE" shared-run-id)" "100"
+ok "nothing to upload" "$(get "$OUT_FILE" should-upload)" "false"
+contains "log names the source" "$LOG" "image_tag (from shared)"
+case "$LOG" in *sha-abc1234*) FAIL=$((FAIL+1)); echo "  FAIL log leaked a shared value";; *) PASS=$((PASS+1)); echo "  ok   log leaked no shared values";; esac
+
+echo "15. load-shared off ignores a store that is sitting right there"
+reset_share
+STORE_IN="$FIXTURES/store-basic.json" STORE_RUN_ID=100
+run "$FIXTURES/override.yml" $'image_tag: from-default\n'
+ok "exit status" "$STATUS" "0"
+ok "store not applied" "$(get "$OUT_FILE" image_tag)" "from-default"
+ok "shared-json empty" "$(get "$OUT_FILE" shared-json)" "{}"
+ok "no provenance" "$(get "$OUT_FILE" shared-run-id)" ""
+
+echo "16. share: published values outrank every other layer"
+reset_share
+STORE_OUT="$WORK/out16" SHARE=$'node_version: "26"\nimage_tag: sha-new\n'
+run "$FIXTURES/override.yml" $'node_version: "18"\n'
+ok "exit status" "$STATUS" "0"
+ok "share beats the file" "$(get "$OUT_FILE" node_version)" "26"
+ok "share is exported like any key" "$(get "$ENV_FILE" image_tag)" "sha-new"
+ok "sources" "$(get "$OUT_FILE" sources)" '{"image_tag":"share","node_version":"share"}'
+ok "upload requested" "$(get "$OUT_FILE" should-upload)" "true"
+ok "artifact name" "$(get "$OUT_FILE" share-artifact-name)" "am-build-vars-store-main"
+ok "artifact path" "$(get "$OUT_FILE" share-artifact-path)" "$WORK/out16/am-build-vars-store.json"
+ok "value reached the store" "$(stored "$WORK/out16" 'store["values"]["image_tag"]')" "sha-new"
+ok "store records the scope" "$(stored "$WORK/out16" 'store["scope"]')" "main"
+ok "store records provenance" "$(stored "$WORK/out16" 'store["origins"]["image_tag"]["run_id"]')" "4242"
+
+echo "17. publishing merges into the store rather than replacing it"
+# load-shared is off here on purpose: a pure producer must still not erase what
+# another workflow published, or the second producer wins and the first vanishes.
+reset_share
+STORE_IN="$FIXTURES/store-basic.json" STORE_OUT="$WORK/out17" SHARE=$'deploy_target: staging\n'
+run "$FIXTURES/nope.yml" ""
+ok "exit status" "$STATUS" "0"
+ok "old and new keys both survive" "$(stored "$WORK/out17" '",".join(sorted(store["values"]))')" \
+  "deploy_target,image_tag,node_version"
+ok "an existing value is untouched" "$(stored "$WORK/out17" 'store["values"]["image_tag"]')" "sha-abc1234"
+ok "an existing origin is untouched" "$(stored "$WORK/out17" 'store["origins"]["image_tag"]["run_id"]')" "100"
+ok "the new key gets this run's origin" "$(stored "$WORK/out17" 'store["origins"]["deploy_target"]["run_id"]')" "4242"
+
+echo "18. share-env captures a value straight out of the environment"
+reset_share
+export captured_tag='v1.2.3 with "quotes" and $DOLLAR and `backticks`'
+STORE_OUT="$WORK/out18" SHARE_ENV="captured_tag"
+run "$FIXTURES/nope.yml" ""
+ok "exit status" "$STATUS" "0"
+ok "captured verbatim" "$(get "$OUT_FILE" captured_tag)" 'v1.2.3 with "quotes" and $DOLLAR and `backticks`'
+ok "stored verbatim" "$(stored "$WORK/out18" 'store["values"]["captured_tag"]')" \
+  'v1.2.3 with "quotes" and $DOLLAR and `backticks`'
+unset captured_tag
+
+echo "19. share-env naming an unset variable fails instead of publishing nothing"
+reset_share
+SHARE_ENV="definitely_not_set_anywhere"
+run "$FIXTURES/nope.yml" ""
+ok "exit status" "$STATUS" "1"
+contains "names the variable" "$LOG" "definitely_not_set_anywhere"
+
+echo "20. the key rules apply to the share path too"
+reset_share
+SHARE=$'GITHUB_TOKEN: nope\n'
+run "$FIXTURES/nope.yml" ""
+ok "reserved: exit status" "$STATUS" "1"
+contains "reserved: names the key" "$LOG" "GITHUB_TOKEN"
+reset_share
+SHARE=$'node-version: "20"\n'
+run "$FIXTURES/nope.yml" ""
+ok "invalid: exit status" "$STATUS" "1"
+contains "invalid: names the key" "$LOG" "node-version"
+
+echo "21. a store is not a trusted input"
+# An artifact anyone with write access could have crafted must not be able to
+# rewrite PATH for the rest of the job.
+printf '%s' '{"schema":1,"scope":"main","values":{"PATH":"/tmp/evil"},"origins":{}}' >"$WORK/evil.json"
+reset_share
+LOAD_SHARED=true STORE_IN="$WORK/evil.json"
+run "$FIXTURES/nope.yml" ""
+ok "exit status" "$STATUS" "1"
+contains "names the key" "$LOG" "PATH"
+
+echo "22. an unreadable store is an error, not a silent fall-through"
+printf '%s' 'not json at all' >"$WORK/garbage.json"
+reset_share
+LOAD_SHARED=true STORE_IN="$WORK/garbage.json"
+run "$FIXTURES/nope.yml" ""
+ok "malformed: exit status" "$STATUS" "1"
+contains "malformed: explains" "$LOG" "not valid JSON"
+printf '%s' '{"schema":99,"scope":"main","values":{},"origins":{}}' >"$WORK/future.json"
+reset_share
+LOAD_SHARED=true STORE_IN="$WORK/future.json"
+run "$FIXTURES/nope.yml" ""
+ok "future schema: exit status" "$STATUS" "1"
+contains "future schema: explains" "$LOG" "schema"
+
+echo "23. scopes map to artifact names without colliding"
+ok "a clean scope stays readable" "$(name main)" "am-build-vars-store-main"
+ok "a slugged scope is disambiguated" \
+  "$([ "$(name 'feat/x')" = "$(name 'feat-x')" ] && echo collision || echo distinct)" "distinct"
+ok "the same scope is stable" "$(name 'feat/x')" "$(name 'feat/x')"
+
+echo "24. choose_artifact only trusts what it should"
+# Newest wins, but the expired one, the one from another repository's run and
+# the one with no run information are all skipped.
+ok "newest trusted artifact wins" "$(choose am-build-vars-store-main 999)" "5"
+# Same fork-run artifact, now produced by the current run: a pull request from a
+# fork has to be able to share values between its own jobs.
+ok "the current run is always trusted" "$(choose am-build-vars-store-main 500)" "7"
+ok "an unknown name finds nothing" "$(choose am-build-vars-store-nope 999)" ""
+reset_share
+
+echo "25. store.py's network path, against a local stand-in for the API"
+# Everything above hands the resolver a store that is already on disk. This is the
+# half that puts it there: the artifact listing, the redirect to signed storage,
+# the zip, and the token that must not follow that redirect.
+if HTTP_OUT="$(python3 "$ROOT/tests/store-http-test.py" 2>&1)"; then
+  PASS=$((PASS + $(printf '%s' "$HTTP_OUT" | sed -n 's/^\([0-9]*\) passed.*/\1/p')))
+  printf '  ok   listing, redirect, unzip, and the token that stays behind\n'
+else
+  FAIL=$((FAIL + 1))
+  printf '  FAIL store.py network path:\n%s\n' "$(printf '%s' "$HTTP_OUT" | sed 's/^/       /')"
+fi
 
 echo
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"

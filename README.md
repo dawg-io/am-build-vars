@@ -33,6 +33,9 @@ Step 3 is the whole interface. The key you write in the file *is* the variable n
 
 Same name, same case, no prefix. Nothing to declare up front, and the step needs no `id`.
 
+Values computed *during* a run can join the same picture — see
+[Sharing variables across workflows](#sharing-variables-across-workflows).
+
 ## The problem it solves
 
 Tools that manage workflows across a fleet of repositories — [ActionsManager][am] among
@@ -54,8 +57,8 @@ The workflow carries fleet-wide defaults inline. A repository that needs somethi
 different commits an `am-build-vars.yml` overriding only the keys that differ. Drift
 detection stays happy because the workflow file never changes.
 
-This action has no runtime dependency on ActionsManager, makes no API calls, and works
-standalone in any repository.
+This action has no runtime dependency on ActionsManager and works standalone in any
+repository. It makes no API calls at all unless you turn sharing on.
 
 ## Requirements
 
@@ -82,10 +85,17 @@ standalone in any repository.
   naming what is missing, rather than a stack trace.
 - Windows runners are **not supported** in v1.
 
-No Node modules, no build step, no network access. The entire implementation is
-[`scripts/resolve.py`](scripts/resolve.py) — about 130 lines you can read in one sitting.
-That small surface is the point: it is a third-party action that touches your build
-configuration, so it should be auditable in a coffee break.
+No Node modules and no build step. The implementation is three short Python files —
+[`scripts/resolve.py`](scripts/resolve.py) merges the layers,
+[`scripts/store.py`](scripts/store.py) looks the shared store up, and
+[`scripts/common.py`](scripts/common.py) holds the handful of things both need. That small
+surface is the point: it is a third-party action that touches your build configuration, so
+it should be auditable in a coffee break.
+
+Leave sharing off and nothing reaches the network and no other action is pulled in. Turn it
+on and the action lists the repository's artifacts through the REST API and uses
+[`actions/upload-artifact`][upload] to write the store — see
+[Sharing variables across workflows](#sharing-variables-across-workflows).
 
 ## Usage
 
@@ -182,6 +192,166 @@ test_command  = npm test    (default — untouched)
 
 Same workflow file, byte for byte. Different builds.
 
+## Sharing variables across workflows
+
+Everything above is static — known before the run starts. The other half of the problem is
+a value the run **computes**: an image tag, a version, a build id, needed later by a
+*different workflow file*. GitHub gives you `needs.<job>.outputs` inside one run and
+nothing at all across runs, so this normally ends in hand-rolled `workflow_run` and
+artifact plumbing in every repository — the per-repo drift this action exists to remove.
+
+The shared store closes that gap. It is a small JSON file kept as an Actions artifact: one
+step publishes into it, a later step anywhere in the repository reads it back as an
+ordinary variable, same name-is-the-name rule.
+
+**The producer** publishes what the run computed:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - run: echo "image_tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - uses: dawg-io/am-build-vars@v1
+        with:
+          share-env: image_tag
+```
+
+**The consumer** is a different workflow file, in a later run:
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read       # required to read the store
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dawg-io/am-build-vars@v1
+        with:
+          load-shared: true
+
+      - run: ./deploy.sh "$image_tag"
+```
+
+No `needs:`, no job outputs, no artifact plumbing. The variable is simply there.
+
+### Publishing: `share-env` or `share`
+
+| Input | Takes | Use it for |
+|---|---|---|
+| `share-env` | **names** of environment variables | anything computed during the run |
+| `share` | a YAML mapping, same syntax as `defaults` | literals and workflow expressions |
+
+Prefer `share-env` for computed values. It reads the value straight out of the environment,
+so a tag containing a quote, a brace or a newline never has to survive a trip through YAML:
+
+```yaml
+- uses: dawg-io/am-build-vars@v1
+  with:
+    # names, whitespace- or comma-separated — safe whatever the values hold
+    share-env: image_tag deploy_target
+
+    # fine for literals; this one is being pasted into a YAML document
+    share: |
+      release_channel: stable
+```
+
+A name that is not set when the step runs is an **error**, not an empty value — a typo in a
+`share-env` list should not quietly publish `""`.
+
+### Precedence
+
+Publishing adds two layers to the two you already had. Lowest to highest:
+
+| Layer | Comes from | Beats |
+|---|---|---|
+| `defaults` | the workflow's inline defaults | — |
+| **shared** | the store, when `load-shared: true` | `defaults` |
+| file | the committed `am-build-vars.yml` | shared |
+| **share** | what this step is publishing | everything |
+
+The committed file **outranks** the store deliberately: config a team just committed should
+never lose to an artifact some run left behind months ago. In practice the two rarely meet —
+a key like `image_tag` is one nobody commits.
+
+What a step publishes outranks everything, so the value written to the store and the value
+the rest of that job sees can never disagree.
+
+The `sources` output says which layer each key actually came from — worth asserting on in a
+test, and it prints no values:
+
+```yaml
+- uses: dawg-io/am-build-vars@v1
+  id: vars
+  with:
+    load-shared: true
+
+- run: echo '${{ steps.vars.outputs.sources }}'
+  # {"image_tag":"shared","node_version":"file","runner":"default"}
+```
+
+### Scope
+
+A scope is a namespace: steps using the same one see each other's values, different ones
+are fully isolated. It defaults to the **current ref name**, so every branch reads and
+writes its own store and a pull request cannot disturb `main`'s.
+
+| Run | Store it uses |
+|---|---|
+| push to `main` | `am-build-vars-store-main` |
+| PR #123 | `am-build-vars-store-123-merge` |
+| push tag `v1.2.3` | `am-build-vars-store-v1.2.3` |
+
+That default isolates, which also means a tag-triggered deploy will **not** see what a build
+on `main` published. When you want it to, name the scope explicitly on both sides:
+
+```yaml
+- uses: dawg-io/am-build-vars@v1
+  with:
+    load-shared: true
+    share-scope: main      # read what builds on main published
+```
+
+### The store accumulates
+
+Publishing **merges** into the store rather than replacing it, so a build workflow sharing
+`image_tag` and a deploy workflow sharing `deployed_at` both survive and a consumer sees
+both. That merge is also why a producer needs `actions: read`: it reads the store it is
+about to write back.
+
+### Before you rely on it
+
+- **Permissions.** Producing *and* consuming need `actions: read` in the job's
+  `permissions:` block. Without it the step fails naming the missing permission, rather
+  than quietly resolving nothing.
+- **Artifacts expire.** The store lives exactly as long as its artifact — 90 days by
+  default, or whatever `share-retention-days` and the repository's settings say. A value
+  nobody republishes eventually disappears.
+- **Every publishing run leaves its own copy**, and the reader takes the newest. That is
+  where the history comes from, and also why a busy scope fills up a run list — set
+  `share-retention-days` low for a store that only has to survive until the next job.
+- **Concurrent producers race.** Two runs publishing to one scope at once both read, then
+  both write; the later write wins and the earlier one's new keys are lost. Put a
+  `concurrency:` group on the producing workflow if that matters.
+- **A missing store is not an error.** The first run in a new scope resolves zero shared
+  keys and carries on. Assert it yourself when a value is mandatory:
+
+  ```yaml
+  - if: env.image_tag == ''
+    run: |
+      echo "::error::nothing has published image_tag for this scope yet"
+      exit 1
+  ```
+- **Never share a secret.** The store is an artifact, and in a public repository artifacts
+  are downloadable by anyone. See [Security](#security).
+
 ## Inputs
 
 | Input | Default | Description |
@@ -190,6 +360,12 @@ Same workflow file, byte for byte. Different builds.
 | `defaults` | `''` | Fleet-wide defaults as a YAML mapping. Applied to any key the config file does not define. |
 | `export-env` | `'true'` | Write every resolved key to `$GITHUB_ENV`. Set `'false'` to leave the job environment untouched. |
 | `fail-on-missing` | `'false'` | Fail the step when the config file is absent, instead of falling back to defaults only. |
+| `share` | `''` | Values to publish to the shared store, as a YAML mapping. |
+| `share-env` | `''` | Names of environment variables to capture and publish, separated by whitespace or commas. |
+| `load-shared` | `'false'` | Read the shared store for this scope and apply it. Needs `actions: read`. |
+| `share-scope` | `github.ref_name` | The namespace shared values live in. Same scope, same store. |
+| `share-token` | `github.token` | Token used to look the store artifact up. |
+| `share-retention-days` | `''` | How long the store artifact is kept. Empty uses the repository default. |
 
 ## Outputs
 
@@ -198,6 +374,9 @@ Same workflow file, byte for byte. Different builds.
 | `json` | Every resolved key/value pair as a compact JSON object. |
 | `keys` | The resolved key names as a sorted JSON array. |
 | `config-file-used` | The path actually read, or `''` when only defaults were applied. |
+| `sources` | Where each key came from, as JSON: `default`, `shared`, `file` or `share`. |
+| `shared-json` | The values that came from the shared store, as JSON. `{}` when none did. |
+| `shared-run-id` | The run whose store was applied, or `''`. Provenance for a value from outside this run. |
 
 ## When environment variables are not enough
 
@@ -207,7 +386,7 @@ choices this action makes.
 | Case | Why | Use |
 |---|---|---|
 | The same step that runs the action | `$GITHUB_ENV` only takes effect in *later* steps | the `json` output |
-| A different job | jobs do not share an environment | a config job (below) |
+| A different job | jobs do not share an environment | a config job (below), or [the shared store](#sharing-variables-across-workflows) |
 | `runs-on`, `strategy.matrix` | evaluated before any step runs | a config job (below) |
 
 For these, give the step an `id` and read the `json` output — every resolved key, as one
@@ -254,6 +433,11 @@ jobs:
 
 `test_matrix` is unwrapped twice: once by the config job's output expression, once by
 `fromJSON` in `strategy.matrix`.
+
+That pattern is the right one for *config* — values that exist before the run starts, which
+`runs-on` and `strategy.matrix` need evaluated before any step runs. For a value the run
+itself computes, reach for [the shared store](#sharing-variables-across-workflows) instead:
+it needs no `needs:` edge at all, and it works across workflow files.
 
 > Passing a value into a shell script? Prefer `env:` over inlining the expression — it
 > keeps quoting sane and multi-line values intact:
@@ -324,6 +508,21 @@ The action fails, with a message naming the file, when:
 
 A missing config file is **not** an error in the default configuration.
 
+Sharing adds its own, all of them naming what to fix:
+
+- `share-env` names a variable that is not set when the step runs;
+- a shared key is not a valid name, or collides with a runner-owned variable;
+- the token cannot read the repository's artifacts — the message names the
+  `actions: read` permission;
+- the store is unreadable: not JSON, or written by a newer schema than this action reads.
+  A corrupted store is an error rather than a silent fall-through to nothing, because the
+  caller asked for values a previous run published and quietly building without them is
+  the confusing outcome;
+- the store would grow past 512 KiB. It is meant for build coordinates, not payloads.
+
+Finding **no** store is not an error: the first run in a new scope resolves zero shared
+keys and carries on.
+
 ## Security
 
 **`am-build-vars.yml` is committed to the repository.** In a public repo it is world
@@ -340,15 +539,36 @@ The action helps, but cannot save you from this:
   plaintext, and would corrupt logs for ordinary values like `20` or `true`.
 - Runner-owned environment variable names are rejected, so a config file cannot rewrite
   `PATH` or `GITHUB_TOKEN` for the rest of the job.
-- The action makes no network calls, reads no secrets, and never writes to
-  `am-build-vars.yml`.
+- The action reads no secrets and never writes to `am-build-vars.yml`. With sharing off
+  it makes no network calls at all.
+
+Sharing adds one more surface, so it has its own rules:
+
+- **The shared store is an artifact, not a secret store.** In a public repository artifacts
+  are downloadable by anyone; in a private one, by everyone with read access. Treat a
+  published value as being exactly as public as the committed config file — never share a
+  token, and never share anything you would not commit.
+- **A store written by a fork is never read by a later run.** Each artifact records the run
+  that produced it, and a store is only trusted when that run belongs to this repository —
+  or *is* the current run, so a pull request from a fork can still share between its own
+  jobs. This is what stops the `pull_request_target` and `workflow_run` shape, where a job
+  holding a write token consumes something a fork wrote.
+- **Scopes isolate by default.** The default scope is the current ref, so a pull request
+  branch and `main` do not share a store unless you deliberately point them at one.
+- **A store is not a trusted input.** Values loaded from one are held to the same key rules
+  as everything else, so a hand-crafted store cannot rewrite `PATH` or `GITHUB_TOKEN` for
+  the rest of the job. Shared key names are logged; shared values are not.
+- **The token stays with GitHub.** The artifact download redirects to signed storage on
+  another host; that request is made with no credentials attached.
 
 ## Not in scope for v1
 
-- Cross-job variable sharing (use the `needs:` pattern above).
 - Nested key resolution or deep merging.
-- Reading GitHub repository variables, secrets, or anything from the API.
+- Reading GitHub repository variables or secrets.
 - Writing or modifying `am-build-vars.yml`.
+- Sharing between *different repositories* — a store is repository-local.
+- Any locking around the shared store: concurrent producers race, last write wins.
+- Outliving the store artifact's retention.
 - Windows runners.
 
 ## Development
@@ -357,9 +577,14 @@ The action helps, but cannot save you from this:
 tests/local-test.sh    # runs the resolver against every fixture, no runner needed
 ```
 
+`tests/local-test.sh` covers the whole merge offline, sharing included: the resolver never
+touches the network, so a store is just a JSON file you can point it at.
+
 [`.github/workflows/test.yml`](.github/workflows/test.yml) is the authoritative suite — it
 runs the real composite action on a runner through every case above, including the
-expected failures.
+expected failures. Its `share-producer` / `share-consumer` pair is the end-to-end proof for
+sharing: the consumer never mentions `needs.share-producer.outputs`, so the only route the
+value can have taken is the store — the same route a second workflow file would take.
 
 The macOS smoke job is skipped by default so pull requests do not pay for macOS minutes.
 Label a PR **`ci:macos`** to run it — worth doing for any change to runner-facing
@@ -367,11 +592,14 @@ behaviour, since that job is what backs the macOS support claim above.
 
 [`.github/dependabot.yml`](.github/dependabot.yml) keeps the actions referenced with
 `uses:` up to date, weekly. Minor and patch bumps are grouped into one PR; majors get
-their own. There is no other ecosystem configured because there is nothing else to track —
-the action ships no package dependencies, and PyYAML comes from the runner image.
+their own. That covers the root `action.yml` too, so the `actions/upload-artifact` pin the
+shared store writes through is kept current. There is no other ecosystem configured because
+there is nothing else to track — the action ships no package dependencies, and PyYAML comes
+from the runner image.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
 [am]: https://github.com/dawg-io
+[upload]: https://github.com/actions/upload-artifact
