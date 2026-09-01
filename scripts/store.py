@@ -42,6 +42,14 @@ MAX_PAGES = 5
 RETRIES = 3
 TIMEOUT = 30
 
+# The store is capped at MAX_STORE_BYTES uncompressed; the zip around it needs
+# some headroom but must still be bounded, because the size check inside the
+# archive cannot run until the whole download is already in memory.
+MAX_DOWNLOAD_BYTES = MAX_STORE_BYTES * 2
+
+# Longest we will honour from a Retry-After header before giving up on it.
+MAX_RETRY_AFTER = 60
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Stop urllib from following the artifact download redirect.
@@ -55,7 +63,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _get(url, token=None, accept="application/vnd.github+json", allow_redirect=True):
+def _get(url, token=None, accept="application/vnd.github+json", allow_redirect=True, max_bytes=None):
+    """Fetch a URL, optionally refusing a response larger than max_bytes.
+
+    The cap matters on the artifact download: an artifact carrying our name that
+    we did not write could be any size at all, and the check inside the zip
+    cannot run until the bytes are already resident.
+    """
     request = urllib.request.Request(url)
     request.add_header("Accept", accept)
     request.add_header("User-Agent", USER_AGENT)
@@ -64,50 +78,99 @@ def _get(url, token=None, accept="application/vnd.github+json", allow_redirect=T
         request.add_header("Authorization", "Bearer " + token)
     opener = urllib.request.build_opener() if allow_redirect else urllib.request.build_opener(_NoRedirect)
     with opener.open(request, timeout=TIMEOUT) as response:
-        return response.read()
+        if max_bytes is None:
+            return response.read()
+        try:
+            declared = int(response.headers.get("Content-Length") or 0)
+        except ValueError:
+            declared = 0
+        if declared > max_bytes:
+            fail(_too_large(declared))
+        # Read one byte past the ceiling: a response with no Content-Length, or a
+        # dishonest one, still cannot exhaust the runner's memory.
+        body = response.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            fail(_too_large(None))
+        return body
 
 
-def _retrying(action, what):
+def _too_large(size):
+    return (
+        "The shared store artifact is larger than the {} KiB ceiling{}. An artifact "
+        "of that name that am-build-vars did not write is in the way -- rename it, "
+        "or pick a different 'share-scope'.".format(
+            MAX_DOWNLOAD_BYTES // 1024,
+            " ({} bytes)".format(size) if size else "",
+        )
+    )
+
+
+def _retry_after(exc):
+    """Seconds to wait per the response's Retry-After header, if it gives one."""
+    header = exc.headers.get("Retry-After") if exc.headers else None
+    if not header:
+        return None
+    try:
+        return max(0, min(int(header.strip()), MAX_RETRY_AFTER))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _retrying(action, what, permission_hint=True):
     """Run a request, retrying only what is worth retrying.
 
-    A 403 here is nearly always a missing permission rather than a blip, so it
-    gets a message naming the fix instead of three slow attempts at the same
-    refusal.
+    'permission_hint' says whether a plain 401/403 should be read as a missing
+    'actions: read'. That is the right reading on the API request, and the wrong
+    one on the leg that fetches the signed storage URL: storage is a different
+    host with its own reasons to refuse, and a short-lived signature that has
+    expired is fixed by asking the API for a fresh one -- which is exactly what
+    another attempt does. Reporting a permission problem there would send someone
+    to change a setting that was never wrong.
     """
     delay = 1.0
     for attempt in range(1, RETRIES + 1):
+        pause = None
         try:
             return action()
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
-                if remaining == "0":
-                    fail(
-                        "The GitHub API rate limit is exhausted, so {} failed. Retry "
-                        "the run once the limit resets.".format(what)
-                    )
+            pause = _retry_after(exc)
+            remaining = exc.headers.get("X-RateLimit-Remaining") if exc.headers else None
+            if exc.code in (401, 403) and remaining == "0":
+                fail(
+                    "The GitHub API rate limit is exhausted, so {} failed. Retry "
+                    "the run once the limit resets.".format(what)
+                )
+            elif exc.code in (401, 403) and permission_hint:
                 fail(
                     "Not authorised to {} (HTTP {}). Sharing variables reads the "
                     "repository's artifacts, so the job needs 'actions: read' in its "
                     "permissions block, and 'share-token' must be a token that has "
                     "it.".format(what, exc.code)
                 )
-            if exc.code == 404:
+            elif exc.code == 404:
                 raise
-            if exc.code < 500 or attempt == RETRIES:
+            elif exc.code in (401, 403, 429) or exc.code >= 500:
+                # 429 is a secondary rate limit, which is the case this ladder
+                # exists for; it used to be sent straight to fail().
+                if attempt == RETRIES:
+                    fail("Could not {} (HTTP {}).".format(what, exc.code))
+            else:
                 fail("Could not {} (HTTP {}).".format(what, exc.code))
         except (urllib.error.URLError, OSError) as exc:
             if attempt == RETRIES:
                 fail("Could not {}: {}.".format(what, getattr(exc, "reason", exc)))
-        time.sleep(delay)
+        time.sleep(pause if pause is not None else delay)
         delay *= 2
 
 
-def list_artifacts(api_url, repository, name, token):
-    """Page through the repository's artifacts, newest pages first.
+def list_artifacts(api_url, repository, name, token, current_run_id):
+    """Page through the repository's artifacts until a usable store turns up.
 
     The name filter is a server-side optimisation only: choose_artifact filters
     again, so an API that ignores the parameter still yields a correct answer.
+    Paging stops as soon as an eligible artifact is in hand -- the API returns
+    newest first, so the extra pages are only ever the fallback for a page that
+    is entirely expired, forked or wrongly named.
     """
     collected = []
     for page in range(1, MAX_PAGES + 1):
@@ -119,13 +182,24 @@ def list_artifacts(api_url, repository, name, token):
         try:
             body = _retrying(lambda: _get(url, token), "list the repository's artifacts")
         except urllib.error.HTTPError:
-            break
+            # A repository with no artifacts answers 200 with an empty list, so a
+            # 404 here means the endpoint itself is not visible to this token --
+            # a private repository it cannot see, or a misspelt name. Reporting
+            # that as "no shared store yet" would let a consumer build with
+            # defaults and never know why.
+            fail(
+                "The artifact listing for {} returned 404, so this token cannot see "
+                "the repository. Check that 'share-token' is a token for {} and that "
+                "the job grants it 'actions: read'.".format(repository, repository)
+            )
         try:
             payload = json.loads(body.decode("utf-8"))
         except ValueError:
             fail("The artifact listing API returned a response that is not JSON.")
         batch = payload.get("artifacts") or []
         collected.extend(batch)
+        if choose_artifact(collected, name, current_run_id) is not None:
+            break
         if len(batch) < PER_PAGE:
             break
     return collected
@@ -174,8 +248,17 @@ def download(api_url, repository, artifact_id, token):
     what = "download the shared store artifact"
 
     def fetch():
+        # Both legs live in one attempt on purpose: a retry re-asks the API and so
+        # gets a *fresh* signed URL, which is the only thing that recovers an
+        # expired signature. Retrying the stale URL alone never would.
         try:
-            return _get(url, token, accept="application/vnd.github+json", allow_redirect=False)
+            return _get(
+                url,
+                token,
+                accept="application/vnd.github+json",
+                allow_redirect=False,
+                max_bytes=MAX_DOWNLOAD_BYTES,
+            )
         except urllib.error.HTTPError as exc:
             if exc.code not in (301, 302, 303, 307, 308):
                 raise
@@ -184,9 +267,21 @@ def download(api_url, repository, artifact_id, token):
                 fail("The artifact download returned a redirect with no location.")
             # Deliberately unauthenticated: the location is a pre-signed URL on
             # storage that is not GitHub, and the token has no business there.
-            return _get(location, token=None, accept="*/*")
+            return _get(location, token=None, accept="*/*", max_bytes=MAX_DOWNLOAD_BYTES)
 
-    body = _retrying(fetch, what)
+    # permission_hint is off: listing already succeeded with this token against
+    # this host, so a refusal now is storage's, not a missing 'actions: read'.
+    try:
+        body = _retrying(fetch, what, permission_hint=False)
+    except urllib.error.HTTPError:
+        # _retrying re-raises 404 so the caller can explain it. Here it means the
+        # artifact went away between the listing and this request -- its retention
+        # expired, or a concurrent run publishing to the same scope replaced it.
+        fail(
+            "The shared store artifact disappeared between being listed and being "
+            "downloaded. Another run publishing to this scope, or the artifact's "
+            "retention expiring, will do that; re-running usually resolves it."
+        )
 
     try:
         archive = zipfile.ZipFile(io.BytesIO(body))
@@ -233,7 +328,8 @@ def main():
     name = artifact_name(scope)
     write_kv(github_output, "artifact-name", name)
 
-    chosen = choose_artifact(list_artifacts(api_url, repository, name, token), name, current_run_id)
+    artifacts = list_artifacts(api_url, repository, name, token, current_run_id)
+    chosen = choose_artifact(artifacts, name, current_run_id)
     if chosen is None:
         print(
             "am-build-vars: no shared store yet for scope '{}' (artifact {})".format(scope, name)

@@ -141,9 +141,11 @@ outputs:
     value: ${{ steps.resolve.outputs.sources }}
   shared-json:
     description: >-
-      The values that came from the shared store and were applied, as a compact JSON
-      object. Empty when 'load-shared' is off or no store was found. This is the shared
-      layer alone; the 'json' output is the merged result.
+      The values that came from the shared store, as a compact JSON object. Empty when
+      'load-shared' is off or no store was found. This is the shared layer as it was
+      read, so it still lists a key that the config file or the 'share' input then
+      overrode - consult the 'sources' output to see which layer actually won a given
+      key, and the 'json' output for the merged result.
     value: ${{ steps.resolve.outputs.shared-json }}
   shared-run-id:
     description: >-
@@ -170,7 +172,17 @@ runs:
 
     - name: Fetch the shared variable store
       id: store
-      if: inputs.load-shared == 'true' || inputs.share != '' || inputs.share-env != ''
+      # Must accept exactly what truthy() in common.py accepts. When these two
+      # disagree, 'load-shared: 1' skips this step while the resolver still
+      # believes loading is on -- the step then succeeds having read nothing.
+      # Spelled out with plain equality rather than contains(fromJSON(...)): a
+      # malformed expression makes the whole manifest fail to load, and this file
+      # has already been bitten once by an expression it could not parse. String
+      # comparison here is case-insensitive, so 'True' and 'YES' are covered too.
+      if: >-
+        inputs.load-shared == 'true' || inputs.load-shared == '1'
+        || inputs.load-shared == 'yes' || inputs.load-shared == 'on'
+        || inputs.share != '' || inputs.share-env != ''
       shell: bash
       run: python3 "$GITHUB_ACTION_PATH/scripts/store.py"
       env:

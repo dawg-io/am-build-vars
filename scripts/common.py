@@ -95,16 +95,6 @@ def artifact_name(scope):
     return ARTIFACT_PREFIX + slug
 
 
-def empty_store(scope):
-    return {
-        "schema": STORE_SCHEMA,
-        "scope": scope,
-        "updated_at": None,
-        "values": {},
-        "origins": {},
-    }
-
-
 def read_store(path):
     """Parse a store file, returning (values, origins).
 

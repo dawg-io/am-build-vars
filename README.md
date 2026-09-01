@@ -92,10 +92,15 @@ No Node modules and no build step. The implementation is three short Python file
 surface is the point: it is a third-party action that touches your build configuration, so
 it should be auditable in a coffee break.
 
-Leave sharing off and nothing reaches the network and no other action is pulled in. Turn it
-on and the action lists the repository's artifacts through the REST API and uses
+Leave sharing off and this action makes no network calls of its own. Turn it on and it
+lists the repository's artifacts through the REST API and uses
 [`actions/upload-artifact`][upload] to write the store — see
 [Sharing variables across workflows](#sharing-variables-across-workflows).
+
+One honest caveat about that dependency: a step's `if:` decides whether the step *runs*,
+not whether the runner *resolves* it. `actions/upload-artifact` is therefore fetched during
+job setup on every run, sharing or not — you will see it in the "Prepare all required
+actions" group. It only ever executes when there is something to publish.
 
 ## Usage
 
@@ -303,11 +308,18 @@ A scope is a namespace: steps using the same one see each other's values, differ
 are fully isolated. It defaults to the **current ref name**, so every branch reads and
 writes its own store and a pull request cannot disturb `main`'s.
 
-| Run | Store it uses |
-|---|---|
-| push to `main` | `am-build-vars-store-main` |
-| PR #123 | `am-build-vars-store-123-merge` |
-| push tag `v1.2.3` | `am-build-vars-store-v1.2.3` |
+| Run | Scope | Store artifact |
+|---|---|---|
+| push to `main` | `main` | `am-build-vars-store-main` |
+| push tag `v1.2.3` | `v1.2.3` | `am-build-vars-store-v1.2.3` |
+| PR #123 | `123/merge` | `am-build-vars-store-123-merge-99b03923` |
+| push to `feat/x` | `feat/x` | `am-build-vars-store-feat-x-79b4cc55` |
+
+An artifact name cannot contain a `/`, so a scope carrying one is slugged. Slugging alone
+would let `feat/x` and `feat-x` land on the *same* store — a value set on one branch
+surfacing on the other — so a short digest of the original scope is appended whenever
+slugging changed anything. Scopes that need no slugging keep the readable name, which is
+the common case.
 
 That default isolates, which also means a tag-triggered deploy will **not** see what a build
 on `main` published. When you want it to, name the scope explicitly on both sides:
@@ -377,6 +389,11 @@ about to write back.
 | `sources` | Where each key came from, as JSON: `default`, `shared`, `file` or `share`. |
 | `shared-json` | The values that came from the shared store, as JSON. `{}` when none did. |
 | `shared-run-id` | The run whose store was applied, or `''`. Provenance for a value from outside this run. |
+
+Every resolved key is also a step output under its own name, so a key called `json`, `keys`
+or `sources` shadows the output of that name — the metadata wins, and the config value is
+unreachable through `steps.<id>.outputs`. It is still in `env`. Only these three collide;
+the hyphenated names cannot, because a key may not contain a hyphen.
 
 ## When environment variables are not enough
 
@@ -532,9 +549,15 @@ Actions secrets for those.
 
 The action helps, but cannot save you from this:
 
-- Resolved values are **never printed**. The log shows key names and whether each came
-  from the file or from a default — enough to debug a resolution, not enough to leak one.
-  What downstream steps do with the values is up to them.
+- **This action never prints a value.** Its own log lines show key names and which layer
+  each came from — enough to debug a resolution, not enough to leak one.
+- **The runner does print them, though**, and that is the part worth understanding. Every
+  key exported to `$GITHUB_ENV` is echoed *with its value* in the `env:` block the runner
+  writes for each later step, so an exported value is visible to anyone who can read the
+  job log. That is GitHub's behaviour for any `$GITHUB_ENV` write, not something this
+  action can suppress. To keep a value out of the logs, set `export-env: 'false'` and
+  consume it through the `json` output instead — nothing is exported, and nothing is
+  echoed.
 - Values are not masked. Masking would be false comfort for something already committed in
   plaintext, and would corrupt logs for ordinary values like `20` or `true`.
 - Runner-owned environment variable names are rejected, so a config file cannot rewrite
@@ -557,7 +580,15 @@ Sharing adds one more surface, so it has its own rules:
   branch and `main` do not share a store unless you deliberately point them at one.
 - **A store is not a trusted input.** Values loaded from one are held to the same key rules
   as everything else, so a hand-crafted store cannot rewrite `PATH` or `GITHUB_TOKEN` for
-  the rest of the job. Shared key names are logged; shared values are not.
+  the rest of the job. This action logs shared key names only — but a shared value is
+  exported like any other, so it reaches the runner's own `env:` echo just the same. The
+  bullet above applies to shared values too.
+- **The store is only as trustworthy as the job that wrote it.** A store from the *current
+  run* is always accepted, which is what lets a fork's pull request share between its own
+  jobs. The flip side: anything that can run in your job can also write the store that job
+  later reads. In a `pull_request_target` workflow that checks out and executes a fork's
+  code — already an anti-pattern for other reasons — that is a route from fork-controlled
+  code into a privileged job's environment.
 - **The token stays with GitHub.** The artifact download redirects to signed storage on
   another host; that request is made with no credentials attached.
 

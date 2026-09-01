@@ -29,6 +29,7 @@ run() {
   : >"$OUT_FILE"
   : >"$ENV_FILE"
   LOG="$(
+    PYTHONDONTWRITEBYTECODE=1 \
     GITHUB_WORKSPACE="${WS:-$ROOT}" \
     GITHUB_OUTPUT="$OUT_FILE" \
     GITHUB_ENV="$ENV_FILE" \
@@ -89,7 +90,7 @@ PY
 
 # choose <artifact-name> <current-run-id> — the id choose_artifact settles on.
 choose() {
-  PYTHONPATH="$ROOT/scripts" python3 - "$FIXTURES/artifacts-list.json" "$1" "$2" <<'PY'
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" python3 - "$FIXTURES/artifacts-list.json" "$1" "$2" <<'PY'
 import json, sys, store
 artifacts = json.load(open(sys.argv[1], encoding="utf-8"))["artifacts"]
 picked = store.choose_artifact(artifacts, sys.argv[2], sys.argv[3])
@@ -99,7 +100,7 @@ PY
 
 # name <scope> — the artifact name a scope maps to.
 name() {
-  PYTHONPATH="$ROOT/scripts" python3 -c "import common,sys; print(common.artifact_name(sys.argv[1]))" "$1"
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts" python3 -c "import common,sys; print(common.artifact_name(sys.argv[1]))" "$1"
 }
 
 ok() {
@@ -391,6 +392,24 @@ else
   FAIL=$((FAIL + 1))
   printf '  FAIL store.py network path:\n%s\n' "$(printf '%s' "$HTTP_OUT" | sed 's/^/       /')"
 fi
+
+echo "26. every spelling truthy() accepts loads the store"
+# The composite's if-gate in action.yml gates the fetch on the same vocabulary.
+# If the two ever drift, the step reads nothing and still exits 0 -- so pin the
+# resolver half here, and the gate half in the workflow's share-consumer job.
+for spelling in true True 1 yes on; do
+  reset_share
+  LOAD_SHARED="$spelling" STORE_IN="$FIXTURES/store-basic.json" STORE_RUN_ID=100
+  run "$FIXTURES/nope.yml" ""
+  ok "load-shared=$spelling applies the store" "$(get "$OUT_FILE" image_tag)" "sha-abc1234"
+done
+for spelling in false no 0 ""; do
+  reset_share
+  LOAD_SHARED="$spelling" STORE_IN="$FIXTURES/store-basic.json" STORE_RUN_ID=100
+  run "$FIXTURES/nope.yml" ""
+  ok "load-shared=${spelling:-<empty>} ignores the store" "$(get "$OUT_FILE" shared-json)" "{}"
+done
+reset_share
 
 echo
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"

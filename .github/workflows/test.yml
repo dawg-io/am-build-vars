@@ -450,9 +450,44 @@ jobs:
       # The scripts import a sibling module, and for a local 'uses: ./' the action
       # path IS this workspace -- so a missing PYTHONDONTWRITEBYTECODE would leave
       # a __pycache__ directory in every consumer's checkout.
+      # The composite's if-gate and truthy() in common.py must agree on what counts
+      # as true. When they drift, the fetch step is skipped while the resolver
+      # still believes loading is on: the step exits 0 having read nothing and
+      # logs "no shared store to apply". A workflow expression can only be
+      # verified on a runner, so assert a non-canonical spelling here.
+      - name: A non-canonical spelling of load-shared still loads
+        id: spelling
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          load-shared: 'yes'
+          share-scope: ci-${{ github.run_id }}
+          export-env: 'false'
+
+      - name: Assert the spelling was honoured
+        env:
+          SHARED: ${{ steps.spelling.outputs.shared-json }}
+          RUN: ${{ steps.spelling.outputs.shared-run-id }}
+          EXPECTED_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ "$SHARED" != "{}" ] \
+            || { echo "::error::load-shared: 'yes' resolved nothing -- the gate and truthy() have drifted"; exit 1; }
+          [ "$RUN" = "$EXPECTED_RUN" ] || { echo "::error::expected provenance, got '$RUN'"; exit 1; }
+
       - name: The action leaves nothing behind in the workspace
         run: |
           set -euo pipefail
+          # Deliberately NOT `git status --porcelain` alone: this repo's own
+          # .gitignore ignores __pycache__/, and porcelain omits ignored files --
+          # so that check alone passes even with the bytecode sitting right there,
+          # which is the one regression this step exists to catch.
+          leftovers="$(find . -name __pycache__ -not -path './.git/*')"
+          if [ -n "$leftovers" ]; then
+            echo "::error::the action wrote bytecode into the caller's workspace:"
+            printf '%s\n' "$leftovers"
+            exit 1
+          fi
           if [ -n "$(git status --porcelain)" ]; then
             echo "::error::the action dirtied the workspace:"
             git status --porcelain
