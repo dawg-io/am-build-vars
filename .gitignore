@@ -1,0 +1,5 @@
+# The scripts import a sibling module, so running them locally leaves bytecode
+# behind. The action itself sets PYTHONDONTWRITEBYTECODE so it never writes any
+# into a consumer's workspace.
+__pycache__/
+*.py[cod]

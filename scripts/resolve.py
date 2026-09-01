@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 """Resolve per-repo build variables for the am-build-vars action.
 
-Reads a committed YAML config file plus an inline YAML `defaults` mapping,
-merges them (file wins, per top-level key), and emits the result to
-$GITHUB_OUTPUT and $GITHUB_ENV.
+Merges up to four layers and emits the result to $GITHUB_OUTPUT and $GITHUB_ENV.
+Lowest precedence first:
+
+    1. defaults      the workflow's inline fleet-wide defaults
+    2. shared        values a previous run published, when load-shared is on
+    3. file          the repository's committed am-build-vars.yml
+    4. share         values this very step is publishing
+
+The committed file outranks the shared store on purpose: config a team committed
+should never lose to an artifact some run left behind months ago. What this step
+publishes outranks everything, so the value written to the store and the value
+the rest of the job sees can never disagree.
+
+This script never touches the network. Finding the store is store.py's job; by
+the time this runs the store is either a file on disk or nothing at all, which
+is what keeps the whole merge testable without a runner.
 
 Contract with action.yml (all values arrive as environment variables):
 
@@ -11,6 +24,14 @@ Contract with action.yml (all values arrive as environment variables):
     INPUT_DEFAULTS         inline YAML mapping of fleet-wide defaults
     INPUT_EXPORT_ENV       "true" to also write each key to $GITHUB_ENV
     INPUT_FAIL_ON_MISSING  "true" to fail when the config file is absent
+    INPUT_SHARE            inline YAML mapping of values to publish
+    INPUT_SHARE_ENV        names of environment variables to capture and publish
+    INPUT_LOAD_SHARED      "true" to apply the shared store as layer 2
+    INPUT_SHARE_SCOPE      sharing scope, naming the store to write
+
+    AM_BUILD_VARS_STORE_IN      path to the store store.py downloaded, or empty
+    AM_BUILD_VARS_STORE_OUT     directory to write the outgoing store into
+    AM_BUILD_VARS_STORE_RUN_ID  the run the incoming store came from
 
 Values are never printed. Key names and their source are, so a run is
 auditable without leaking anything the config file happens to contain.
@@ -20,8 +41,19 @@ import datetime
 import json
 import os
 import re
-import secrets
 import sys
+import tempfile
+
+from common import (
+    STORE_FILENAME,
+    artifact_name,
+    dump_store,
+    fail,
+    now_iso,
+    read_store,
+    truthy,
+    write_kv,
+)
 
 try:
     import yaml
@@ -40,17 +72,8 @@ KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RESERVED_PREFIXES = ("GITHUB_", "ACTIONS_", "RUNNER_")
 RESERVED_NAMES = ("PATH", "HOME", "CI", "NODE_OPTIONS", "LD_PRELOAD")
 
-
-def fail(message, file=None):
-    """Emit a GitHub Actions error annotation and exit non-zero."""
-    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    prefix = "::error file={}::".format(file.replace(",", "%2C")) if file else "::error::"
-    print(prefix + escaped, flush=True)
-    sys.exit(1)
-
-
-def truthy(value):
-    return str(value).strip().lower() in ("true", "1", "yes", "on")
+SHARE_ORIGIN = "the 'share' input"
+SHARE_ENV_ORIGIN = "the 'share-env' input"
 
 
 def load_mapping(text, origin, file=None):
@@ -118,40 +141,45 @@ def validate_key(key, origin):
         )
 
 
-def write_kv(path, key, value):
-    """Append key=value using the heredoc delimiter form.
+def render_layer(values, origin):
+    """Validate and render a whole layer of parsed YAML in one go."""
+    rendered = {}
+    for key in values:
+        validate_key(key, origin)
+        rendered[key] = render(key, values[key], origin)
+    return rendered
 
-    The delimiter is random and re-rolled if it ever appears inside the value,
-    which is what makes newlines and shell metacharacters safe.
+
+def collect_share(share_input, share_env_input):
+    """Build the layer this step is publishing, from both of its inputs.
+
+    'share' takes a YAML mapping, which is right for literals. 'share-env' takes
+    names and reads the values straight out of the environment, which is right
+    for anything computed during the run: a tag containing a quote, a newline or
+    a brace never has to survive a trip through YAML.
     """
-    delimiter = "ghadelimiter_" + secrets.token_hex(16)
-    while delimiter in value or delimiter in key:
-        delimiter = "ghadelimiter_" + secrets.token_hex(16)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write("{}<<{}\n{}\n{}\n".format(key, delimiter, value, delimiter))
+    values = render_layer(load_mapping(share_input, SHARE_ORIGIN), SHARE_ORIGIN)
+
+    # Applied second, so a name given to both wins here. Documented, and the
+    # unsurprising reading of "capture whatever this variable holds now".
+    for name in re.split(r"[\s,]+", (share_env_input or "").strip()):
+        if not name:
+            continue
+        validate_key(name, SHARE_ENV_ORIGIN)
+        if name not in os.environ:
+            fail(
+                "'share-env' names '{}', but no environment variable of that name is "
+                "set in this step. Set it in an earlier step (an 'echo {}=... >> "
+                "$GITHUB_ENV' line, or an 'env:' block) before sharing it.".format(
+                    name, name
+                )
+            )
+        values[name] = os.environ[name]
+    return values
 
 
-def main():
-    config_input = os.environ.get("INPUT_CONFIG_FILE", "").strip()
-    defaults_input = os.environ.get("INPUT_DEFAULTS", "")
-    export_env = truthy(os.environ.get("INPUT_EXPORT_ENV", "true"))
-    fail_on_missing = truthy(os.environ.get("INPUT_FAIL_ON_MISSING", "false"))
-
-    github_output = os.environ.get("GITHUB_OUTPUT")
-    github_env = os.environ.get("GITHUB_ENV")
-    workspace = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
-
-    if not github_output:
-        fail("GITHUB_OUTPUT is not set. This action must run inside GitHub Actions.")
-    if export_env and not github_env:
-        fail("GITHUB_ENV is not set. This action must run inside GitHub Actions.")
-
-    # --- defaults -----------------------------------------------------------
-    defaults = load_mapping(defaults_input, "the 'defaults' input")
-    for key in defaults:
-        validate_key(key, "the 'defaults' input")
-
-    # --- config file --------------------------------------------------------
+def discover_config(config_input, workspace):
+    """Find the committed config file. Returns (path_or_None, candidates)."""
     # One filename, several allowed homes. An explicit 'config-file' input turns
     # discovery off entirely and uses exactly the path given.
     if config_input:
@@ -174,9 +202,7 @@ def main():
     if len(present) > 1:
         fail(
             "Found {} in more than one location: {}. Keep exactly one and delete "
-            "the rest.".format(
-                CONFIG_NAME, ", ".join(rel for rel, _ in present)
-            )
+            "the rest.".format(CONFIG_NAME, ", ".join(rel for rel, _ in present))
         )
 
     # A near-miss is worth an error rather than a silent fall-through to defaults:
@@ -192,36 +218,126 @@ def main():
                         )
                     )
 
+    return (present[0][1] if present else None), found
+
+
+def publish(scope, store_values, store_origins, share_values, destination):
+    """Write the outgoing store, merging what this step shares into what exists.
+
+    Merging rather than replacing is the whole point: a tag published by the
+    build workflow and an environment published by the deploy workflow both have
+    to survive, or the second producer silently erases the first.
+    """
+    merged = dict(store_values)
+    merged.update(share_values)
+
+    stamp = {
+        "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+        "workflow": os.environ.get("GITHUB_WORKFLOW", ""),
+        "sha": os.environ.get("GITHUB_SHA", ""),
+        "at": now_iso(),
+    }
+    origins = dict(store_origins)
+    for key in share_values:
+        origins[key] = stamp
+
+    payload = dump_store(scope, merged, origins)
+
+    directory = destination or tempfile.mkdtemp(prefix="am-build-vars-store-")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, STORE_FILENAME)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+    except OSError as exc:
+        fail("Could not write the shared store to {}: {}".format(directory, exc.strerror or exc))
+    return path, merged
+
+
+def main():
+    config_input = os.environ.get("INPUT_CONFIG_FILE", "").strip()
+    defaults_input = os.environ.get("INPUT_DEFAULTS", "")
+    export_env = truthy(os.environ.get("INPUT_EXPORT_ENV", "true"))
+    fail_on_missing = truthy(os.environ.get("INPUT_FAIL_ON_MISSING", "false"))
+    share_input = os.environ.get("INPUT_SHARE", "")
+    share_env_input = os.environ.get("INPUT_SHARE_ENV", "")
+    load_shared = truthy(os.environ.get("INPUT_LOAD_SHARED", "false"))
+    share_scope = os.environ.get("INPUT_SHARE_SCOPE", "")
+
+    store_in = os.environ.get("AM_BUILD_VARS_STORE_IN", "").strip()
+    store_out = os.environ.get("AM_BUILD_VARS_STORE_OUT", "").strip()
+    store_run_id = os.environ.get("AM_BUILD_VARS_STORE_RUN_ID", "").strip()
+
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    github_env = os.environ.get("GITHUB_ENV")
+    workspace = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
+
+    if not github_output:
+        fail("GITHUB_OUTPUT is not set. This action must run inside GitHub Actions.")
+    if export_env and not github_env:
+        fail("GITHUB_ENV is not set. This action must run inside GitHub Actions.")
+
+    # --- defaults -----------------------------------------------------------
+    defaults = render_layer(
+        load_mapping(defaults_input, "the 'defaults' input"), "the 'defaults' input"
+    )
+
+    # --- values this step publishes -----------------------------------------
+    share_values = collect_share(share_input, share_env_input)
+
+    # --- the store a previous run left behind -------------------------------
+    # Read whenever one was downloaded, even with load-shared off: publishing
+    # merges into it, and a producer that skipped the read would erase it.
+    store_values, store_origins = read_store(store_in) if store_in else ({}, {})
+    if store_values:
+        # An artifact is not a trusted input; hold it to the same key rules as
+        # everything else, so a hand-crafted store cannot export PATH.
+        for key in store_values:
+            validate_key(key, "the shared store")
+    shared = dict(store_values) if load_shared else {}
+
+    # --- config file --------------------------------------------------------
+    config_path, candidates = discover_config(config_input, workspace)
+
     file_values = {}
     config_file_used = ""
-    if present:
-        _, config_path = present[0]
-        display = os.path.relpath(config_path, workspace)
-        config_file_used = display
+    if config_path:
+        config_file_used = os.path.relpath(config_path, workspace)
         try:
             with open(config_path, "r", encoding="utf-8") as handle:
                 text = handle.read()
         except OSError as exc:
-            fail("Could not read {}: {}".format(display, exc.strerror or exc))
-        file_values = load_mapping(text, display, file=display)
-        for key in file_values:
-            validate_key(key, display)
+            fail("Could not read {}: {}".format(config_file_used, exc.strerror or exc))
+        file_values = render_layer(
+            load_mapping(text, config_file_used, file=config_file_used), config_file_used
+        )
     elif fail_on_missing:
         fail(
             "No config file found and 'fail-on-missing' is true. Looked for: "
-            "{}.".format(", ".join(rel for rel, _ in found))
+            "{}.".format(", ".join(rel for rel, _ in candidates))
         )
 
-    # --- merge: file wins, per top-level key (no deep merge) -----------------
-    resolved = dict(defaults)
-    resolved.update(file_values)
-
+    # --- merge: lowest precedence first, per top-level key (no deep merge) ---
     rendered = {}
     sources = {}
-    for key in resolved:
-        origin = config_file_used if key in file_values else "the 'defaults' input"
-        rendered[key] = render(key, resolved[key], origin)
-        sources[key] = "file" if key in file_values else "default"
+    for origin, layer in (
+        ("default", defaults),
+        ("shared", shared),
+        ("file", file_values),
+        ("share", share_values),
+    ):
+        for key, value in layer.items():
+            rendered[key] = value
+            sources[key] = origin
+
+    # --- the outgoing store -------------------------------------------------
+    store_path = ""
+    store_name = ""
+    if share_values:
+        store_name = artifact_name(share_scope)
+        store_path, _ = publish(
+            share_scope, store_values, store_origins, share_values, store_out
+        )
 
     # --- emit ---------------------------------------------------------------
     for key, value in rendered.items():
@@ -232,6 +348,12 @@ def main():
     write_kv(github_output, "json", json.dumps(rendered, separators=(",", ":")))
     write_kv(github_output, "keys", json.dumps(sorted(rendered), separators=(",", ":")))
     write_kv(github_output, "config-file-used", config_file_used)
+    write_kv(github_output, "sources", json.dumps(sources, separators=(",", ":"), sort_keys=True))
+    write_kv(github_output, "shared-json", json.dumps(shared, separators=(",", ":")))
+    write_kv(github_output, "shared-run-id", store_run_id if load_shared and store_in else "")
+    write_kv(github_output, "should-upload", "true" if share_values else "false")
+    write_kv(github_output, "share-artifact-name", store_name)
+    write_kv(github_output, "share-artifact-path", store_path)
 
     # --- log: key names and their source only, never values ------------------
     if config_file_used:
@@ -239,8 +361,17 @@ def main():
     else:
         print(
             "am-build-vars: no config file found (looked for {}); using defaults "
-            "only".format(", ".join(rel for rel, _ in found))
+            "only".format(", ".join(rel for rel, _ in candidates))
         )
+    if load_shared:
+        if store_in:
+            print(
+                "am-build-vars: applied {} shared key(s) from run {}".format(
+                    len(shared), store_run_id or "unknown"
+                )
+            )
+        else:
+            print("am-build-vars: no shared store to apply")
     if rendered:
         print("am-build-vars: resolved {} key(s):".format(len(rendered)))
         for key in sorted(rendered):
@@ -249,6 +380,14 @@ def main():
         print("am-build-vars: resolved 0 keys.")
     if export_env and rendered:
         print("am-build-vars: exported {} key(s) to the job environment.".format(len(rendered)))
+    if share_values:
+        print(
+            "am-build-vars: publishing {} key(s) to shared store '{}':".format(
+                len(share_values), store_name
+            )
+        )
+        for key in sorted(share_values):
+            print("  {}".format(key))
 
 
 if __name__ == "__main__":
