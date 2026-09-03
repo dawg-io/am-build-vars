@@ -1,6 +1,12 @@
 {
-  "total_count": 6,
+  "total_count": 7,
   "artifacts": [
+    {
+      "name": "am-build-vars-store-main",
+      "expired": false,
+      "created_at": "2026-08-01T00:00:00Z",
+      "workflow_run": {"id": 700, "repository_id": 7, "head_repository_id": 7, "head_branch": "main"}
+    },
     {
       "id": 1,
       "name": "am-build-vars-store-main",

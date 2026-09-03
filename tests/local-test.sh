@@ -398,8 +398,11 @@ ok "a slugged scope is disambiguated" \
 ok "the same scope is stable" "$(name 'feat/x')" "$(name 'feat/x')"
 
 echo "24. choose_artifact only trusts what it should"
-# Newest wins, but the expired one, the one from another repository's run and
-# the one with no run information are all skipped.
+# Newest wins, but the expired one, the one from another repository's run, the
+# one with no run information and the one with no id are all skipped. Each of
+# those four is newer than the winner, so a rule that stopped working would
+# change this answer -- and the id-less one, being newest of all, would make
+# choose() raise on the subscript rather than quietly return the wrong id.
 ok "newest trusted artifact wins" "$(choose am-build-vars-store-main 999)" "5"
 # Same fork-run artifact, now produced by the current run: a pull request from a
 # fork has to be able to share values between its own jobs.
