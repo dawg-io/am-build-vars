@@ -370,7 +370,7 @@ about to write back.
 |---|---|---|
 | `config-file` | `''` | Explicit path to the file, turning discovery off. Leave empty to search the root then `.github/`. |
 | `defaults` | `''` | Fleet-wide defaults as a YAML mapping. Applied to any key the config file does not define. |
-| `export-env` | `'true'` | Write every resolved key to `$GITHUB_ENV`. Set `'false'` to leave the job environment untouched. |
+| `export-env` | `'true'` | Write every resolved key to `$GITHUB_ENV`, overwriting any existing variable of the same name. Set `'false'` to leave the job environment untouched. |
 | `fail-on-missing` | `'false'` | Fail the step when the config file is absent, instead of falling back to defaults only. |
 | `share` | `''` | Values to publish to the shared store, as a YAML mapping. |
 | `share-env` | `''` | Names of environment variables to capture and publish, separated by whitespace or commas. |
@@ -542,6 +542,9 @@ keys and carries on.
 
 ## Security
 
+Found something? Report it privately — [`SECURITY.md`](SECURITY.md) has the route
+and says which of the behaviours below are deliberate rather than findings.
+
 **`am-build-vars.yml` is committed to the repository.** In a public repo it is world
 readable, and in a private one it is visible to everyone with read access and to every
 fork and CI log consumer. **Never put secrets, tokens, or credentials in it.** Use GitHub
@@ -591,6 +594,23 @@ Sharing adds one more surface, so it has its own rules:
   code into a privileged job's environment.
 - **The token stays with GitHub.** The artifact download redirects to signed storage on
   another host; that request is made with no credentials attached.
+
+## Versioning
+
+`@v1` is a **moving tag**. It points at the newest `v1.x` release, so a fix lands
+in your workflow on its next run without you editing anything — and so does every
+other change in that release. Breaking changes get a new major and a new tag; they
+never arrive through `v1`.
+
+```yaml
+- uses: dawg-io/am-build-vars@v1        # newest v1.x — recommended
+- uses: dawg-io/am-build-vars@v1.2.0    # exactly this release
+- uses: dawg-io/am-build-vars@6f4c9d2   # exactly this commit
+```
+
+Pin the SHA if your policy is that a third-party action must never change under
+you. That is the same trade every action makes: you stop getting fixes until you
+bump it yourself. [`CHANGELOG.md`](CHANGELOG.md) is what `v1` moved through.
 
 ## Not in scope for v1
 
