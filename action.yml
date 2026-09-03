@@ -221,7 +221,7 @@ runs:
     # value is exactly what the reader does not know - so that half is store.py.
     - name: Publish the shared variable store
       if: steps.resolve.outputs.should-upload == 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.resolve.outputs.share-artifact-name }}
         path: ${{ steps.resolve.outputs.share-artifact-path }}
