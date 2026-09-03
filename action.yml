@@ -1,11 +1,7 @@
 name: 'AM Build Vars'
 description: >-
-  Read per-repository build variables from a committed am-build-vars.yml file and
-  expose them to the rest of the job as environment variables and step outputs, with
-  inline fleet-wide defaults for any key the repository does not override. Lets one
-  byte-identical managed workflow produce different results per repository. Variables
-  computed during a run can also be published to a shared store and read back by a
-  later am-build-vars step in any other job or workflow.
+  Per-repository build variables from a committed am-build-vars.yml, exposed to the
+  whole job as environment variables.
 author: 'dawg-io'
 
 branding:
