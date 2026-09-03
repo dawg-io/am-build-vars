@@ -21,7 +21,7 @@ jobs:
       - name: action.yml parses as third-party action metadata
         run: |
           python3 - <<'PY'
-          import sys, yaml
+          import re, sys, yaml
 
           # The two characters that open a workflow expression, assembled at runtime so
           # this file never contains the literal sequence.
@@ -73,12 +73,53 @@ jobs:
                   if section == "outputs" and not (spec.get("value") or "").strip():
                       errors.append("outputs.{} has no value expression".format(key))
 
+          # Marketplace refuses a listing whose branding it cannot render, and that
+          # refusal arrives at publish time -- after the release is already cut.
+          # Colours are a closed set of eight. Icons are Feather's set minus a
+          # handful GitHub drops, which is too long to pin here: this catches a
+          # missing block, a bad colour and the known-dropped names, but a
+          # well-formed icon that is simply not a Feather name still reaches
+          # Marketplace. 'author' is not required by the runner; the listing
+          # shows it, so treat it as required here.
+          BRANDING_COLORS = {
+              "white", "yellow", "blue", "green", "orange", "red", "purple", "gray-dark",
+          }
+          # Feather icons GitHub does not accept.
+          BRANDING_ICONS_OMITTED = {
+              "coffee", "columns", "divide-circle", "divide-square", "divide", "frown",
+              "hexagon", "key", "meh", "mouse-pointer", "smile", "tool", "x-octagon",
+          }
+
+          if not (meta.get("author") or "").strip():
+              errors.append("missing top-level 'author'; the Marketplace listing shows it")
+
+          branding = meta.get("branding")
+          if not isinstance(branding, dict):
+              errors.append("missing 'branding'; Marketplace requires an icon and a colour")
+          else:
+              color = branding.get("color")
+              if color not in BRANDING_COLORS:
+                  errors.append("branding.color {!r} is not one of {}".format(
+                      color, ", ".join(sorted(BRANDING_COLORS))))
+              icon = branding.get("icon")
+              if not isinstance(icon, str) or not icon.strip():
+                  errors.append("branding.icon is missing or not a string")
+              elif not re.match(r"^[a-z0-9]+(-[a-z0-9]+)*$", icon):
+                  errors.append(
+                      "branding.icon {!r} is not a Feather icon name (lowercase, "
+                      "hyphen-separated)".format(icon))
+              elif icon in BRANDING_ICONS_OMITTED:
+                  errors.append(
+                      "branding.icon {!r} is a Feather icon GitHub does not "
+                      "accept".format(icon))
+
           if errors:
               for err in errors:
                   print("::error file=action.yml::{}".format(err))
               sys.exit(1)
-          print("action.yml OK: {} inputs, {} outputs".format(
-              len(meta.get("inputs") or {}), len(meta.get("outputs") or {})))
+          print("action.yml OK: {} inputs, {} outputs, branding {}/{}".format(
+              len(meta.get("inputs") or {}), len(meta.get("outputs") or {}),
+              branding["icon"], branding["color"]))
           PY
 
       - name: Example config file is valid YAML
@@ -474,6 +515,25 @@ jobs:
           [ "$SHARED" != "{}" ] \
             || { echo "::error::load-shared: 'yes' resolved nothing -- the gate and truthy() have drifted"; exit 1; }
           [ "$RUN" = "$EXPECTED_RUN" ] || { echo "::error::expected provenance, got '$RUN'"; exit 1; }
+
+      # The other half of that agreement. A workflow expression has no trim(), so
+      # a padded value is false to the gate and true to truthy() -- the fetch is
+      # skipped while the resolver still believes sharing is on. That used to exit
+      # 0 having resolved nothing; it must now fail and say why.
+      - name: A padded load-shared fails instead of quietly resolving nothing
+        id: padded
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          load-shared: ' true '
+          share-scope: ci-${{ github.run_id }}
+          export-env: 'false'
+
+      - name: Assert the padded spelling was rejected
+        run: |
+          [ "${{ steps.padded.outcome }}" = "failure" ] \
+            || { echo "::error::a padded load-shared resolved nothing and still passed"; exit 1; }
 
       - name: The action leaves nothing behind in the workspace
         run: |

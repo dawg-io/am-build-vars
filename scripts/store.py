@@ -224,6 +224,11 @@ def choose_artifact(artifacts, name, current_run_id):
             continue
         if artifact.get("name") != name or artifact.get("expired"):
             continue
+        # The id is what the download is addressed by, so an entry without one is
+        # not a candidate. Every real listing carries it; skipping here rather
+        # than trusting it keeps main() free of a subscript that can raise.
+        if artifact.get("id") is None:
+            continue
         run = artifact.get("workflow_run")
         if not isinstance(run, dict):
             continue
@@ -236,9 +241,7 @@ def choose_artifact(artifacts, name, current_run_id):
 
     if not eligible:
         return None
-    eligible.sort(
-        key=lambda a: (str(a.get("created_at") or ""), int(a.get("id") or 0)), reverse=True
-    )
+    eligible.sort(key=lambda a: (str(a.get("created_at") or ""), int(a["id"])), reverse=True)
     return eligible[0]
 
 
