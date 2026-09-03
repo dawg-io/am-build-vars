@@ -5,13 +5,12 @@ Notable changes to am-build-vars. The format follows
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 `v1` is a moving tag: it points at the newest `v1.x` release, so a workflow
-pinned to `@v1` picks up everything under **Unreleased** once it ships. Pin a
-full version, or a commit SHA, to opt out of that.
+pinned to `@v1` picks up each release below as soon as it ships. Pin a full
+version, or a commit SHA, to opt out of that.
 
-## Unreleased
+## [1.0.0] - 2026-09-03
 
-Nothing released yet. Everything below is the surface the first release will
-carry.
+First release. Everything below is the surface `v1` starts from.
 
 ### Added
 
