@@ -1,0 +1,53 @@
+{
+  "total_count": 7,
+  "artifacts": [
+    {
+      "name": "am-build-vars-store-main",
+      "expired": false,
+      "created_at": "2026-08-01T00:00:00Z",
+      "workflow_run": {"id": 700, "repository_id": 7, "head_repository_id": 7, "head_branch": "main"}
+    },
+    {
+      "id": 1,
+      "name": "am-build-vars-store-main",
+      "expired": false,
+      "created_at": "2026-01-01T00:00:00Z",
+      "workflow_run": {"id": 100, "repository_id": 7, "head_repository_id": 7, "head_branch": "main"}
+    },
+    {
+      "id": 5,
+      "name": "am-build-vars-store-main",
+      "expired": false,
+      "created_at": "2026-03-01T00:00:00Z",
+      "workflow_run": {"id": 300, "repository_id": 7, "head_repository_id": 7, "head_branch": "main"}
+    },
+    {
+      "id": 6,
+      "name": "am-build-vars-store-main",
+      "expired": true,
+      "created_at": "2026-04-01T00:00:00Z",
+      "workflow_run": {"id": 400, "repository_id": 7, "head_repository_id": 7, "head_branch": "main"}
+    },
+    {
+      "id": 7,
+      "name": "am-build-vars-store-main",
+      "expired": false,
+      "created_at": "2026-05-01T00:00:00Z",
+      "workflow_run": {"id": 500, "repository_id": 7, "head_repository_id": 99, "head_branch": "attacker-branch"}
+    },
+    {
+      "id": 8,
+      "name": "am-build-vars-store-other",
+      "expired": false,
+      "created_at": "2026-06-01T00:00:00Z",
+      "workflow_run": {"id": 600, "repository_id": 7, "head_repository_id": 7, "head_branch": "main"}
+    },
+    {
+      "id": 9,
+      "name": "am-build-vars-store-main",
+      "expired": false,
+      "created_at": "2026-07-01T00:00:00Z",
+      "workflow_run": null
+    }
+  ]
+}

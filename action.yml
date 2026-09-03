@@ -1,0 +1,232 @@
+name: 'AM Build Vars'
+description: >-
+  Read per-repository build variables from a committed am-build-vars.yml file and
+  expose them to the rest of the job as environment variables and step outputs, with
+  inline fleet-wide defaults for any key the repository does not override. Lets one
+  byte-identical managed workflow produce different results per repository. Variables
+  computed during a run can also be published to a shared store and read back by a
+  later am-build-vars step in any other job or workflow.
+author: 'dawg-io'
+
+branding:
+  icon: 'sliders'
+  color: 'purple'
+
+inputs:
+  config-file:
+    description: >-
+      Optional explicit path to the build variables file, relative to the workspace root
+      (absolute paths are also accepted). Leave empty to auto-discover am-build-vars.yml,
+      which is looked for in the repository root first and then in .github/ - setting this
+      input turns that discovery off and uses exactly the path given. The file is optional
+      either way: if none exists the action succeeds using the 'defaults' input alone. The
+      repository must already be checked out - run actions/checkout before this action.
+    required: false
+    default: ''
+  defaults:
+    description: >-
+      Fleet-wide default values as a YAML mapping, using the same syntax as the config
+      file (JSON is also accepted, since JSON is valid YAML). A key from the config file
+      always overrides the same key here; keys absent from the config file fall back to
+      this value. Precedence is per top-level key - values are replaced, not deep-merged.
+      Example: "node_version: \"20\"\nrunner: ubuntu-latest".
+    required: false
+    default: ''
+  export-env:
+    description: >-
+      Whether to write every resolved key into $GITHUB_ENV so later steps in the same job
+      can read it as "env.KEY" in an expression, or as "$KEY" in a shell. Set to 'false' to
+      leave the job environment untouched and consume values through the 'json' output only.
+      Note that exported names overwrite any existing environment variable of the same name.
+    required: false
+    default: 'true'
+  fail-on-missing:
+    description: >-
+      Whether to fail the step when the config file does not exist. Defaults to 'false',
+      which is the normal mode: a repository with no am-build-vars.yml simply gets the
+      fleet-wide defaults. Set to 'true' to require every repository to carry the file.
+    required: false
+    default: 'false'
+
+  share:
+    description: >-
+      Values to publish to the shared store, as a YAML mapping using the same syntax as
+      'defaults'. Any later am-build-vars step that sets 'load-shared' on the same scope
+      reads them back as ordinary variables - a different job, a different workflow file
+      or a later run. Published values also win over every other layer in this step, so
+      what is stored and what the rest of this job sees can never disagree. Publishing
+      merges into the existing store rather than replacing it, so two workflows can each
+      contribute their own keys. Reading the store to merge into needs 'actions: read'.
+    required: false
+    default: ''
+  share-env:
+    description: >-
+      Names of environment variables to capture and publish to the shared store, separated
+      by whitespace or commas. This is the form to use for anything computed during the
+      run, such as a tag built from the commit: the value is read straight out of the
+      environment, so it never has to survive a trip through YAML quoting. Each name must
+      already be set when this step runs - name one that is not and the step fails rather
+      than publishing an empty value. A name given to both this and 'share' takes its
+      value from here.
+    required: false
+    default: ''
+  load-shared:
+    description: >-
+      Whether to read the shared store for this scope and apply it. Off by default, so
+      nothing changes for a workflow that does not share: no API call, no extra
+      permission, no extra time. Turn it on to read values published by an earlier
+      am-build-vars step anywhere in the repository. Shared values outrank the 'defaults'
+      input but lose to the committed config file, so a key the repository committed is
+      never overridden by something a previous run left behind. Requires 'actions: read'
+      in the job's permissions block. Finding no store is not an error.
+    required: false
+    default: 'false'
+  share-scope:
+    description: >-
+      The namespace for shared variables. Steps using the same scope see each other's
+      published values; steps using different scopes are fully isolated. Defaults to the
+      current ref name (the github.ref_name context), so a branch reads and writes its own
+      store and a pull request cannot disturb one. Set it explicitly - to a branch name, or
+      to a constant such as 'global' - when a workflow on one ref has to read values
+      published from another, which is the usual arrangement for a tag-triggered deploy
+      reading what a build on the default branch published.
+    required: false
+    default: ${{ github.ref_name }}
+  share-token:
+    description: >-
+      The token used to look the shared store artifact up through the REST API. Defaults
+      to the job's own github.token, which is right in nearly every case; the job still
+      needs 'actions: read' in its permissions block for that token to be allowed to read
+      artifacts. Pass a different token only to widen what the lookup can see. This token
+      is used for the artifact listing and for starting the download; the signed storage
+      URL the download redirects to is fetched with no credentials attached.
+    required: false
+    default: ${{ github.token }}
+  share-retention-days:
+    description: >-
+      How long the shared store artifact is kept, in days, passed straight through to
+      actions/upload-artifact. Leave it empty to use the repository's own default, which
+      is 90 days unless it has been changed. This is how long a published variable stays
+      readable: once the artifact expires the values are gone, so a scope that has to
+      survive a long quiet period needs a longer retention than a scope used to hand a
+      tag from one workflow to the next a minute later.
+    required: false
+    default: ''
+
+outputs:
+  json:
+    description: >-
+      All resolved key/value pairs as a compact JSON object. Read individual values with an
+      expression such as "fromJSON(steps.<id>.outputs.json).my_key", or pass the whole object
+      to another job as a job output. Values that were lists or mappings in YAML are
+      themselves JSON, so they need a second fromJSON() at the point of use.
+    value: ${{ steps.resolve.outputs.json }}
+  keys:
+    description: >-
+      The names of all resolved keys as a sorted JSON array of strings. Useful for
+      debugging and for asserting that a repository defined the keys a workflow expects.
+    value: ${{ steps.resolve.outputs.keys }}
+  config-file-used:
+    description: >-
+      The workspace-relative path of the config file that was actually read, or an empty
+      string when no config file existed and only the inline defaults were applied.
+    value: ${{ steps.resolve.outputs.config-file-used }}
+
+  sources:
+    description: >-
+      Where each resolved key came from, as a JSON object mapping the key name to one of
+      "default", "shared", "file" or "share". Useful for asserting in a test that a value
+      really did arrive by the route you expected, and for debugging a resolution without
+      printing any values.
+    value: ${{ steps.resolve.outputs.sources }}
+  shared-json:
+    description: >-
+      The values that came from the shared store, as a compact JSON object. Empty when
+      'load-shared' is off or no store was found. This is the shared layer as it was
+      read, so it still lists a key that the config file or the 'share' input then
+      overrode - consult the 'sources' output to see which layer actually won a given
+      key, and the 'json' output for the merged result.
+    value: ${{ steps.resolve.outputs.shared-json }}
+  shared-run-id:
+    description: >-
+      The id of the workflow run whose store was applied, or an empty string when no
+      shared values were applied. Provenance for a value that arrived from outside this
+      run - it names the run to open when a shared variable is not what you expected.
+    value: ${{ steps.resolve.outputs.shared-run-id }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check runner prerequisites
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo "::error::am-build-vars requires python3 on the runner PATH. It is preinstalled on GitHub-hosted ubuntu and macOS runner images; on a self-hosted runner, install Python 3 or use actions/setup-python before this step."
+          exit 1
+        fi
+        if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+          echo "::error::am-build-vars requires the PyYAML module for python3. It is preinstalled on GitHub-hosted ubuntu runner images, but NOT on macOS runners or most self-hosted ones. Install it before this step, for example with actions/setup-python followed by 'python3 -m pip install pyyaml'."
+          exit 1
+        fi
+
+    - name: Fetch the shared variable store
+      id: store
+      # Must accept exactly what truthy() in common.py accepts. When these two
+      # disagree, 'load-shared: 1' skips this step while the resolver still
+      # believes loading is on -- the step then succeeds having read nothing.
+      # Spelled out with plain equality rather than contains(fromJSON(...)): a
+      # malformed expression makes the whole manifest fail to load, and this file
+      # has already been bitten once by an expression it could not parse. String
+      # comparison here is case-insensitive, so 'True' and 'YES' are covered too.
+      if: >-
+        inputs.load-shared == 'true' || inputs.load-shared == '1'
+        || inputs.load-shared == 'yes' || inputs.load-shared == 'on'
+        || inputs.share != '' || inputs.share-env != ''
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/scripts/store.py"
+      env:
+        # These scripts import a sibling module. Without this, Python writes a
+        # __pycache__ directory next to them -- and for a local 'uses: ./' that
+        # directory lands in the caller's own workspace.
+        PYTHONDONTWRITEBYTECODE: '1'
+        INPUT_SHARE_SCOPE: ${{ inputs.share-scope }}
+        INPUT_SHARE_TOKEN: ${{ inputs.share-token }}
+
+    - name: Resolve build variables
+      id: resolve
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/scripts/resolve.py"
+      env:
+        PYTHONDONTWRITEBYTECODE: '1'
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
+        INPUT_DEFAULTS: ${{ inputs.defaults }}
+        INPUT_EXPORT_ENV: ${{ inputs.export-env }}
+        INPUT_FAIL_ON_MISSING: ${{ inputs.fail-on-missing }}
+        INPUT_SHARE: ${{ inputs.share }}
+        INPUT_SHARE_ENV: ${{ inputs.share-env }}
+        INPUT_LOAD_SHARED: ${{ inputs.load-shared }}
+        INPUT_SHARE_SCOPE: ${{ inputs.share-scope }}
+        AM_BUILD_VARS_STORE_IN: ${{ steps.store.outputs.store-path }}
+        AM_BUILD_VARS_STORE_OUT: ${{ runner.temp }}/am-build-vars-store-out
+        AM_BUILD_VARS_STORE_RUN_ID: ${{ steps.store.outputs.run-id }}
+        # The backstop for the gate above. An expression has no trim(), so a
+        # padded 'load-shared' is false to that if: and true to truthy() -- the
+        # fetch is skipped while the resolver still believes sharing is on. The
+        # resolver refuses that combination rather than resolving nothing.
+        AM_BUILD_VARS_STORE_OUTCOME: ${{ steps.store.outcome }}
+
+    # Writing the store is upload-artifact's job. Locating one to read is not
+    # something it can do - it downloads by run, and which run published the
+    # value is exactly what the reader does not know - so that half is store.py.
+    - name: Publish the shared variable store
+      if: steps.resolve.outputs.should-upload == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.resolve.outputs.share-artifact-name }}
+        path: ${{ steps.resolve.outputs.share-artifact-path }}
+        retention-days: ${{ inputs.share-retention-days }}
+        # A second am-build-vars step in the same run replaces the store it wrote
+        # a moment ago rather than failing on the duplicate name.
+        overwrite: true
+        if-no-files-found: error

@@ -1,0 +1,38 @@
+# am-build-vars.yml — per-repository build variables.
+#
+# Copy this file into a repository as `am-build-vars.yml` — either at the root or
+# in `.github/` — and edit the values. The managed workflow stays byte-identical
+# across every repository; this file is what makes this repository build
+# differently. The name is always `am-build-vars.yml`: `.yaml` is not read, and
+# having it in both locations is an error rather than a silent coin flip.
+#
+# Rules:
+#   * Top-level keys only. Keys must match [A-Za-z_][A-Za-z0-9_]* — use underscores,
+#     not dashes or dots.
+#   * Every key here overrides the workflow's inline default of the same name.
+#     Keys you omit fall back to that default. It is a replace, not a deep merge.
+#   * THIS FILE IS COMMITTED TO THE REPOSITORY. Never put secrets in it.
+#     Use GitHub Actions secrets for anything sensitive.
+
+# Quote version numbers, or YAML will read 20.10 as the float 20.1 and 20 as an int.
+node_version: "20"
+
+# Booleans become the strings "true" / "false".
+coverage_enabled: true
+
+# Plain numbers are fine when you really want a number.
+retries: 3
+
+# Lists and mappings are emitted as compact JSON. Consume them with fromJSON():
+#   matrix:
+#     node: ${{ fromJSON(needs.config.outputs.test_matrix) }}
+test_matrix: ["18", "20", "24"]
+
+build_args:
+  target: production
+  minify: true
+
+# Multi-line values round-trip exactly, newlines included.
+release_notes: |
+  Line one.
+  Line two.

@@ -1,0 +1,588 @@
+name: Test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    # 'labeled' is what lets the ci:macos gate below be reached from a PR.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: action.yml metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: action.yml parses as third-party action metadata
+        run: |
+          python3 - <<'PY'
+          import re, sys, yaml
+
+          # The two characters that open a workflow expression, assembled at runtime so
+          # this file never contains the literal sequence.
+          EXPR_OPEN = "$" + "{" * 2
+
+          with open("action.yml", encoding="utf-8") as fh:
+              meta = yaml.safe_load(fh)
+
+          errors = []
+          for field in ("name", "description", "runs"):
+              if not meta.get(field):
+                  errors.append("missing top-level '{}'".format(field))
+
+          runs = meta.get("runs") or {}
+          if runs.get("using") != "composite":
+              errors.append("runs.using must be 'composite', found {!r}".format(runs.get("using")))
+          if not runs.get("steps"):
+              errors.append("runs.steps is empty")
+          for step in runs.get("steps") or []:
+              if "run" in step and not step.get("shell"):
+                  errors.append("composite run step {!r} has no shell".format(step.get("name")))
+
+          # ActionsManager's step picker parses these to pre-fill the with: block,
+          # so every input and output must carry a usable description.
+          for section in ("inputs", "outputs"):
+              entries = meta.get(section) or {}
+              if not entries:
+                  errors.append("no {} declared".format(section))
+              for key, spec in entries.items():
+                  if not isinstance(spec, dict):
+                      errors.append("{}.{} is not a mapping".format(section, key))
+                      continue
+                  description = (spec.get("description") or "").strip()
+                  if not description:
+                      errors.append("{}.{} has no description".format(section, key))
+                  # The runner evaluates expressions inside descriptions, so an
+                  # illustrative one written in prose is parsed as a live one and the
+                  # whole manifest fails to load. Only outputs.<name>.value may carry an
+                  # expression. EXPR_OPEN is built by concatenation for the same reason:
+                  # a literal occurrence here would be parsed inside this workflow.
+                  if EXPR_OPEN in description:
+                      errors.append(
+                          "{}.{} description contains a template expression; the runner "
+                          "evaluates it and fails to load action.yml. Write the expression "
+                          "without the surrounding braces.".format(section, key)
+                      )
+                  if section == "inputs" and "default" not in spec and not spec.get("required"):
+                      errors.append("{}.{} is neither required nor defaulted".format(section, key))
+                  if section == "outputs" and not (spec.get("value") or "").strip():
+                      errors.append("outputs.{} has no value expression".format(key))
+
+          # Marketplace refuses a listing whose branding it cannot render, and that
+          # refusal arrives at publish time -- after the release is already cut.
+          # Colours are a closed set of eight. Icons are Feather's set minus a
+          # handful GitHub drops, which is too long to pin here: this catches a
+          # missing block, a bad colour and the known-dropped names, but a
+          # well-formed icon that is simply not a Feather name still reaches
+          # Marketplace. 'author' is not required by the runner; the listing
+          # shows it, so treat it as required here.
+          BRANDING_COLORS = {
+              "white", "yellow", "blue", "green", "orange", "red", "purple", "gray-dark",
+          }
+          # Feather icons GitHub does not accept.
+          BRANDING_ICONS_OMITTED = {
+              "coffee", "columns", "divide-circle", "divide-square", "divide", "frown",
+              "hexagon", "key", "meh", "mouse-pointer", "smile", "tool", "x-octagon",
+          }
+
+          if not (meta.get("author") or "").strip():
+              errors.append("missing top-level 'author'; the Marketplace listing shows it")
+
+          branding = meta.get("branding")
+          if not isinstance(branding, dict):
+              errors.append("missing 'branding'; Marketplace requires an icon and a colour")
+          else:
+              color = branding.get("color")
+              if color not in BRANDING_COLORS:
+                  errors.append("branding.color {!r} is not one of {}".format(
+                      color, ", ".join(sorted(BRANDING_COLORS))))
+              icon = branding.get("icon")
+              if not isinstance(icon, str) or not icon.strip():
+                  errors.append("branding.icon is missing or not a string")
+              elif not re.match(r"^[a-z0-9]+(-[a-z0-9]+)*$", icon):
+                  errors.append(
+                      "branding.icon {!r} is not a Feather icon name (lowercase, "
+                      "hyphen-separated)".format(icon))
+              elif icon in BRANDING_ICONS_OMITTED:
+                  errors.append(
+                      "branding.icon {!r} is a Feather icon GitHub does not "
+                      "accept".format(icon))
+
+          if errors:
+              for err in errors:
+                  print("::error file=action.yml::{}".format(err))
+              sys.exit(1)
+          print("action.yml OK: {} inputs, {} outputs, branding {}/{}".format(
+              len(meta.get("inputs") or {}), len(meta.get("outputs") or {}),
+              branding["icon"], branding["color"]))
+          PY
+
+      - name: Example config file is valid YAML
+        run: python3 -c "import yaml; yaml.safe_load(open('am-build-vars.example.yml'))"
+
+  resolver:
+    name: Resolver unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash tests/local-test.sh
+
+  action:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # --- 1. config file present -----------------------------------------
+      - name: Config file present
+        id: present
+        uses: ./
+        with:
+          config-file: tests/fixtures/basic.yml
+          defaults: |
+            node_version: "18"
+            unused_default: from-defaults
+
+      - name: Assert config file present
+        env:
+          JSON: ${{ steps.present.outputs.json }}
+          KEYS: ${{ steps.present.outputs.keys }}
+          USED: ${{ steps.present.outputs.config-file-used }}
+          FROM_JSON: ${{ fromJSON(steps.present.outputs.json).node_version }}
+          MATRIX: ${{ fromJSON(steps.present.outputs.json).test_matrix }}
+        run: |
+          set -euo pipefail
+          assert() { [ "$2" = "$3" ] || { echo "::error::$1: expected '$3', got '$2'"; exit 1; }; }
+          # File value wins over the inline default.
+          assert "fromJSON node_version" "$FROM_JSON" "20"
+          # Keys absent from the file still come from the defaults.
+          assert "json unused_default" "$(echo "$JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["unused_default"])')" "from-defaults"
+          # Lists arrive as JSON, ready for a second fromJSON().
+          assert "test_matrix json" "$MATRIX" "[18,20,24]"
+          assert "config-file-used" "$USED" "tests/fixtures/basic.yml"
+          assert "keys" "$KEYS" '["build_args","coverage_enabled","node_version","retries","runner","test_matrix","unused_default"]'
+          # And the same values reached the job environment.
+          assert "env node_version" "${node_version:-}" "20"
+          assert "env coverage_enabled" "${coverage_enabled:-}" "true"
+          assert "env build_args" "${build_args:-}" '{"target":"production","minify":true}'
+
+      # --- 2. default discovery at the repository root --------------------
+      - name: Stage a root config file
+        run: cp tests/fixtures/basic.yml am-build-vars.yml
+
+      - name: Default config path
+        id: discovered
+        uses: ./
+        with:
+          export-env: 'false'
+
+      - name: Assert default config path
+        env:
+          USED: ${{ steps.discovered.outputs.config-file-used }}
+          NODE: ${{ fromJSON(steps.discovered.outputs.json).node_version }}
+        run: |
+          set -euo pipefail
+          [ "$USED" = "am-build-vars.yml" ] || { echo "::error::expected am-build-vars.yml, got '$USED'"; exit 1; }
+          [ "$NODE" = "20" ] || { echo "::error::expected 20, got '$NODE'"; exit 1; }
+
+      - name: Unstage the root config file
+        if: always()
+        run: rm -f am-build-vars.yml
+
+      # --- 3. config file absent, defaults only ---------------------------
+      - name: Config file absent
+        id: absent
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          defaults: |
+            only_from_defaults: "yes"
+            absent_runner: ubuntu-22.04
+
+      - name: Assert config file absent
+        env:
+          USED: ${{ steps.absent.outputs.config-file-used }}
+          VALUE: ${{ fromJSON(steps.absent.outputs.json).only_from_defaults }}
+        run: |
+          set -euo pipefail
+          # A missing config file is success, not an error.
+          [ "$VALUE" = "yes" ] || { echo "::error::expected 'yes', got '$VALUE'"; exit 1; }
+          [ -z "$USED" ] || { echo "::error::config-file-used should be empty, got '$USED'"; exit 1; }
+          [ "${absent_runner:-}" = "ubuntu-22.04" ] || { echo "::error::default not exported"; exit 1; }
+
+      # --- 4. precedence ---------------------------------------------------
+      - name: Override precedence
+        id: precedence
+        uses: ./
+        with:
+          config-file: tests/fixtures/override.yml
+          defaults: |
+            node_version: "18"
+            kept_default: untouched
+
+      - name: Assert override precedence
+        env:
+          JSON: ${{ steps.precedence.outputs.json }}
+        run: |
+          set -euo pipefail
+          [ "$JSON" = '{"node_version":"24","kept_default":"untouched"}' ] \
+            || { echo "::error::unexpected json: $JSON"; exit 1; }
+          [ "${node_version:-}" = "24" ] || { echo "::error::env override failed"; exit 1; }
+
+      # --- 5. values containing newlines ----------------------------------
+      - name: Multi-line values
+        id: multiline
+        uses: ./
+        with:
+          config-file: tests/fixtures/multiline.yml
+
+      - name: Assert multi-line values
+        env:
+          NOTES: ${{ fromJSON(steps.multiline.outputs.json).release_notes }}
+          TRICKY: ${{ fromJSON(steps.multiline.outputs.json).tricky }}
+        run: |
+          set -euo pipefail
+          expected=$'First line\nSecond line with "quotes" and $DOLLAR\nThird line\n'
+          # Compare with a sentinel so the trailing newline is part of the comparison.
+          [ "${NOTES}X" = "${expected}X" ] || { echo "::error::release_notes did not round-trip"; exit 1; }
+          [ "${release_notes:-}X" = "${expected}X" ] || { echo "::error::release_notes env did not round-trip"; exit 1; }
+          [ "$TRICKY" = 'a`b$(c)d;e&f|g' ] || { echo "::error::metacharacters did not round-trip"; exit 1; }
+          [ "$(printf '%s' "$NOTES" | wc -l | tr -d ' ')" = "3" ] || { echo "::error::wrong line count"; exit 1; }
+
+      # --- 6. discovery: .github/, two locations, wrong extension ---------
+      - name: Stage a .github config file
+        run: cp tests/fixtures/basic.yml .github/am-build-vars.yml
+
+      - name: Discover under .github
+        id: dotgithub
+        uses: ./
+        with:
+          export-env: 'false'
+
+      - name: Assert .github discovery
+        env:
+          USED: ${{ steps.dotgithub.outputs.config-file-used }}
+          NODE: ${{ fromJSON(steps.dotgithub.outputs.json).node_version }}
+        run: |
+          set -euo pipefail
+          [ "$USED" = ".github/am-build-vars.yml" ] || { echo "::error::got '$USED'"; exit 1; }
+          [ "$NODE" = "20" ] || { echo "::error::got '$NODE'"; exit 1; }
+
+      - name: Stage a second copy at the root
+        run: cp tests/fixtures/override.yml am-build-vars.yml
+
+      - name: Config file in two locations
+        id: twoloc
+        continue-on-error: true
+        uses: ./
+
+      - name: Unstage both
+        if: always()
+        run: rm -f am-build-vars.yml .github/am-build-vars.yml
+
+      - name: Assert two-location failure
+        run: |
+          [ "${{ steps.twoloc.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure when the file exists in two locations"; exit 1; }
+
+      - name: Stage the wrong extension
+        run: cp tests/fixtures/wrong-ext.yaml am-build-vars.yaml
+
+      - name: Wrong extension
+        id: wrongext
+        continue-on-error: true
+        uses: ./
+
+      - name: Unstage the wrong extension
+        if: always()
+        run: rm -f am-build-vars.yaml
+
+      - name: Assert wrong-extension failure
+        run: |
+          [ "${{ steps.wrongext.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on am-build-vars.yaml"; exit 1; }
+
+      # --- 7. malformed YAML ----------------------------------------------
+      - name: Malformed YAML
+        id: malformed
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/malformed.yml
+
+      - name: Assert malformed failure
+        run: |
+          [ "${{ steps.malformed.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on malformed YAML"; exit 1; }
+
+      # --- 8. reserved and invalid key names ------------------------------
+      - name: Reserved key name
+        id: reserved
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/reserved.yml
+
+      - name: Invalid key name
+        id: badkey
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/bad-key.yml
+
+      - name: Assert key-name failures
+        run: |
+          [ "${{ steps.reserved.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on reserved key"; exit 1; }
+          [ "${{ steps.badkey.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure on invalid key name"; exit 1; }
+
+      # --- 9. fail-on-missing ----------------------------------------------
+      - name: Missing file with fail-on-missing
+        id: strict
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          fail-on-missing: 'true'
+
+      - name: Assert fail-on-missing
+        run: |
+          [ "${{ steps.strict.outcome }}" = "failure" ] \
+            || { echo "::error::expected failure with fail-on-missing"; exit 1; }
+
+      # --- 10. export-env: false -------------------------------------------
+      - name: Export disabled
+        id: noexport
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          export-env: 'false'
+          defaults: |
+            never_exported: secret-ish
+
+      - name: Assert export disabled
+        env:
+          VALUE: ${{ fromJSON(steps.noexport.outputs.json).never_exported }}
+        run: |
+          set -euo pipefail
+          [ "$VALUE" = "secret-ish" ] || { echo "::error::output missing"; exit 1; }
+          [ -z "${never_exported:-}" ] || { echo "::error::value leaked into the environment"; exit 1; }
+
+  # The claim this feature makes is that a value created in one place is readable
+  # somewhere that shares no context with it. These two jobs are that claim: the
+  # consumer never mentions needs.share-producer.outputs, so the only route the
+  # value can have taken is the shared store -- exactly the route a second
+  # workflow file would take.
+  share-producer:
+    name: Share (producer)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Publishing merges into the existing store, so even a pure producer reads.
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # The value a real pipeline has: computed during the run, not committed.
+      - name: Compute a tag the way a build would
+        run: echo "image_tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+
+      - name: Publish it to the shared store
+        id: publish
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          share-env: image_tag
+          share: |
+            deploy_target: staging
+            node_version: "22"
+          share-scope: ci-${{ github.run_id }}
+          # These artifacts are test scaffolding; do not keep them for 90 days.
+          share-retention-days: '1'
+
+      - name: Assert the published values resolved here too
+        env:
+          SOURCES: ${{ steps.publish.outputs.sources }}
+        run: |
+          set -euo pipefail
+          assert() { [ "$2" = "$3" ] || { echo "::error::$1: expected '$3', got '$2'"; exit 1; }; }
+          # What you publish is what the rest of the job sees.
+          assert "share value" "${deploy_target:-}" "staging"
+          assert "share-env value" "${image_tag:-}" "sha-${GITHUB_SHA:0:7}"
+          assert "sources" "$SOURCES" \
+            '{"deploy_target":"share","image_tag":"share","node_version":"share"}'
+
+  share-consumer:
+    name: Share (consumer)
+    needs: share-producer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the store the other job wrote
+        id: consume
+        uses: ./
+        with:
+          # Pins node_version to "24", which the shared store also sets.
+          config-file: tests/fixtures/override.yml
+          load-shared: true
+          share-scope: ci-${{ github.run_id }}
+          defaults: |
+            node_version: "18"
+            deploy_target: production
+            runner: ubuntu-latest
+
+      - name: Assert the value crossed the job boundary
+        env:
+          SOURCES: ${{ steps.consume.outputs.sources }}
+          SHARED: ${{ steps.consume.outputs.shared-json }}
+          RUN: ${{ steps.consume.outputs.shared-run-id }}
+          EXPECTED_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          assert() { [ "$2" = "$3" ] || { echo "::error::$1: expected '$3', got '$2'"; exit 1; }; }
+          # Created in another job, read here as an ordinary environment variable.
+          assert "image_tag crossed the boundary" "${image_tag:-}" "sha-${GITHUB_SHA:0:7}"
+          # The full precedence chain, in one job: shared beats the inline
+          # default, the committed file beats shared, untouched defaults survive.
+          assert "shared beats default" "${deploy_target:-}" "staging"
+          assert "file beats shared" "${node_version:-}" "24"
+          assert "default survives" "${runner:-}" "ubuntu-latest"
+          assert "sources" "$SOURCES" \
+            '{"deploy_target":"shared","image_tag":"shared","node_version":"file","runner":"default"}'
+          assert "provenance names the producing run" "$RUN" "$EXPECTED_RUN"
+          # The shared layer on its own, without the merge.
+          [ "$(printf '%s' "$SHARED" | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin))))')" \
+            = "deploy_target,image_tag,node_version" ] \
+            || { echo "::error::unexpected shared-json: $SHARED"; exit 1; }
+
+      - name: A scope nothing has written to
+        id: nostore
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          load-shared: true
+          share-scope: ci-${{ github.run_id }}-never-written
+          export-env: 'false'
+          defaults: |
+            only_default: "yes"
+
+      - name: Assert an absent store is not an error
+        env:
+          SHARED: ${{ steps.nostore.outputs.shared-json }}
+          RUN: ${{ steps.nostore.outputs.shared-run-id }}
+          VALUE: ${{ fromJSON(steps.nostore.outputs.json).only_default }}
+        run: |
+          set -euo pipefail
+          [ "$SHARED" = "{}" ] || { echo "::error::expected no shared values, got '$SHARED'"; exit 1; }
+          [ -z "$RUN" ] || { echo "::error::expected no provenance, got '$RUN'"; exit 1; }
+          # A first run in a new scope still resolves everything else normally.
+          [ "$VALUE" = "yes" ] || { echo "::error::defaults did not apply"; exit 1; }
+
+      # The scripts import a sibling module, and for a local 'uses: ./' the action
+      # path IS this workspace -- so a missing PYTHONDONTWRITEBYTECODE would leave
+      # a __pycache__ directory in every consumer's checkout.
+      # The composite's if-gate and truthy() in common.py must agree on what counts
+      # as true. When they drift, the fetch step is skipped while the resolver
+      # still believes loading is on: the step exits 0 having read nothing and
+      # logs "no shared store to apply". A workflow expression can only be
+      # verified on a runner, so assert a non-canonical spelling here.
+      - name: A non-canonical spelling of load-shared still loads
+        id: spelling
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          load-shared: 'yes'
+          share-scope: ci-${{ github.run_id }}
+          export-env: 'false'
+
+      - name: Assert the spelling was honoured
+        env:
+          SHARED: ${{ steps.spelling.outputs.shared-json }}
+          RUN: ${{ steps.spelling.outputs.shared-run-id }}
+          EXPECTED_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ "$SHARED" != "{}" ] \
+            || { echo "::error::load-shared: 'yes' resolved nothing -- the gate and truthy() have drifted"; exit 1; }
+          [ "$RUN" = "$EXPECTED_RUN" ] || { echo "::error::expected provenance, got '$RUN'"; exit 1; }
+
+      # The other half of that agreement. A workflow expression has no trim(), so
+      # a padded value is false to the gate and true to truthy() -- the fetch is
+      # skipped while the resolver still believes sharing is on. That used to exit
+      # 0 having resolved nothing; it must now fail and say why.
+      - name: A padded load-shared fails instead of quietly resolving nothing
+        id: padded
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          load-shared: ' true '
+          share-scope: ci-${{ github.run_id }}
+          export-env: 'false'
+
+      - name: Assert the padded spelling was rejected
+        run: |
+          [ "${{ steps.padded.outcome }}" = "failure" ] \
+            || { echo "::error::a padded load-shared resolved nothing and still passed"; exit 1; }
+
+      - name: The action leaves nothing behind in the workspace
+        run: |
+          set -euo pipefail
+          # Deliberately NOT `git status --porcelain` alone: this repo's own
+          # .gitignore ignores __pycache__/, and porcelain omits ignored files --
+          # so that check alone passes even with the bytecode sitting right there,
+          # which is the one regression this step exists to catch.
+          leftovers="$(find . -name __pycache__ -not -path './.git/*')"
+          if [ -n "$leftovers" ]; then
+            echo "::error::the action wrote bytecode into the caller's workspace:"
+            printf '%s\n' "$leftovers"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::the action dirtied the workspace:"
+            git status --porcelain
+            exit 1
+          fi
+
+  # The README claims macOS support; this is what keeps that claim honest.
+  # Runs on push to main, on manual dispatch, and on any PR labelled 'ci:macos'
+  # so a change to runner-facing behaviour can be verified before it merges.
+  # Unlabelled PRs do not pay for macOS minutes.
+  macos-smoke:
+    name: macOS smoke test
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'ci:macos')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # macOS runner images ship python3 but NOT PyYAML, so the action's documented
+      # macOS prerequisite has to be satisfied here exactly as a user would satisfy it.
+      # This is the recipe the README gives; if it stops working, the README is wrong.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - run: python3 -m pip install pyyaml
+
+      - id: vars
+        uses: ./
+        with:
+          config-file: tests/fixtures/basic.yml
+      - env:
+          NODE: ${{ fromJSON(steps.vars.outputs.json).node_version }}
+        run: |
+          set -euo pipefail
+          [ "$NODE" = "20" ] || { echo "::error::expected 20, got '$NODE'"; exit 1; }
+          [ "${node_version:-}" = "20" ] || { echo "::error::env export failed on macOS"; exit 1; }
