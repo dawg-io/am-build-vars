@@ -351,6 +351,31 @@ LOAD_SHARED=true STORE_IN="$WORK/evil.json"
 run "$FIXTURES/nope.yml" ""
 ok "exit status" "$STATUS" "1"
 contains "names the key" "$LOG" "PATH"
+# The key is baked into an artifact, so unlike a bad key in an input there is
+# nothing in the workflow to edit. Say so, or the error is a dead end.
+contains "points at the remedy" "$LOG" "delete the store artifact"
+# A producer hits the same wall: publishing reads the store it merges into, so
+# it cannot publish its way past a poisoned one either.
+reset_share
+STORE_IN="$WORK/evil.json" STORE_OUT="$WORK/out21" SHARE=$'deploy_target: staging\n'
+run "$FIXTURES/nope.yml" ""
+ok "producer: exit status" "$STATUS" "1"
+contains "producer: points at the remedy" "$LOG" "delete the store artifact"
+# An unexportable name, not just a reserved one.
+printf '%s' '{"schema":1,"scope":"main","values":{"node-version":"20"},"origins":{}}' >"$WORK/dashed.json"
+reset_share
+LOAD_SHARED=true STORE_IN="$WORK/dashed.json"
+run "$FIXTURES/nope.yml" ""
+ok "invalid name: exit status" "$STATUS" "1"
+contains "invalid name: points at the remedy" "$LOG" "delete the store artifact"
+# An input keeps the short message -- there is a workflow line to fix.
+reset_share
+SHARE=$'node-version: "20"\n'
+run "$FIXTURES/nope.yml" ""
+case "$LOG" in
+  *"delete the store artifact"*) FAIL=$((FAIL+1)); echo "  FAIL an input error borrowed the store remedy";;
+  *) PASS=$((PASS+1)); echo "  ok   an input error keeps the short message";;
+esac
 
 echo "22. an unreadable store is an error, not a silent fall-through"
 printf '%s' 'not json at all' >"$WORK/garbage.json"

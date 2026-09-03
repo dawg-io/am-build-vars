@@ -76,6 +76,20 @@ RESERVED_NAMES = ("PATH", "HOME", "CI", "NODE_OPTIONS", "LD_PRELOAD")
 
 SHARE_ORIGIN = "the 'share' input"
 SHARE_ENV_ORIGIN = "the 'share-env' input"
+STORE_ORIGIN = "the shared store"
+
+# A bad key in an input is fixed by editing the workflow. A bad key in the store
+# is baked into an artifact, and it fails every step on that scope -- producers
+# included, because publishing reads the store it merges into. Publishing over it
+# is therefore not a way out, so say what the way out is.
+STORE_REMEDY = (
+    " This key is in the store artifact itself, so every step on this scope fails "
+    "until it goes: delete the store artifact for this 'share-scope' to reset it."
+)
+
+
+def _remedy(origin):
+    return STORE_REMEDY if origin == STORE_ORIGIN else ""
 
 
 def load_mapping(text, origin, file=None):
@@ -131,7 +145,9 @@ def validate_key(key, origin):
         fail(
             "Invalid key '{}' in {}. Keys must match [A-Za-z_][A-Za-z0-9_]* so that "
             "the JSON key and the exported environment variable name are always "
-            "identical. Use underscores instead of dashes or dots.".format(key, origin)
+            "identical. Use underscores instead of dashes or dots.{}".format(
+                key, origin, _remedy(origin)
+            )
         )
     upper = key.upper()
     if upper.startswith(RESERVED_PREFIXES) or upper in RESERVED_NAMES:
@@ -139,7 +155,7 @@ def validate_key(key, origin):
             "Key '{}' in {} is reserved. Keys that collide with runner-owned "
             "environment variables (GITHUB_*, ACTIONS_*, RUNNER_*, PATH, HOME, CI, "
             "NODE_OPTIONS, LD_PRELOAD) are rejected because exporting them would "
-            "break the job.".format(key, origin)
+            "break the job.{}".format(key, origin, _remedy(origin))
         )
 
 
@@ -312,7 +328,7 @@ def main():
         # An artifact is not a trusted input; hold it to the same key rules as
         # everything else, so a hand-crafted store cannot export PATH.
         for key in store_values:
-            validate_key(key, "the shared store")
+            validate_key(key, STORE_ORIGIN)
     shared = dict(store_values) if load_shared else {}
 
     # --- config file --------------------------------------------------------
