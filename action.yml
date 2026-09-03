@@ -1,7 +1,7 @@
 name: 'AM Build Vars'
 description: >-
-  Per-repository build variables from a committed am-build-vars.yml, exposed to the
-  whole job as environment variables.
+  Per-repository build variables from a committed file, exported as env vars and
+  shared across jobs, workflows and runs.
 author: 'dawg-io'
 
 branding:
