@@ -604,7 +604,7 @@ never arrive through `v1`.
 
 ```yaml
 - uses: dawg-io/am-build-vars@v1        # newest v1.x — recommended
-- uses: dawg-io/am-build-vars@v1.2.0    # exactly this release
+- uses: dawg-io/am-build-vars@v1.0.0    # exactly this release
 - uses: dawg-io/am-build-vars@6f4c9d2   # exactly this commit
 ```
 
