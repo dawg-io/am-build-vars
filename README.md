@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/actionsmanager-logo.png" alt="ActionsManager" width="420">
+</p>
+
 # am-build-vars
 
 A composite GitHub Action that reads per-repository build variables from a committed
