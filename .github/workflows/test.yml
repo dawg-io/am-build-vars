@@ -475,6 +475,25 @@ jobs:
             || { echo "::error::load-shared: 'yes' resolved nothing -- the gate and truthy() have drifted"; exit 1; }
           [ "$RUN" = "$EXPECTED_RUN" ] || { echo "::error::expected provenance, got '$RUN'"; exit 1; }
 
+      # The other half of that agreement. A workflow expression has no trim(), so
+      # a padded value is false to the gate and true to truthy() -- the fetch is
+      # skipped while the resolver still believes sharing is on. That used to exit
+      # 0 having resolved nothing; it must now fail and say why.
+      - name: A padded load-shared fails instead of quietly resolving nothing
+        id: padded
+        continue-on-error: true
+        uses: ./
+        with:
+          config-file: tests/fixtures/does-not-exist.yml
+          load-shared: ' true '
+          share-scope: ci-${{ github.run_id }}
+          export-env: 'false'
+
+      - name: Assert the padded spelling was rejected
+        run: |
+          [ "${{ steps.padded.outcome }}" = "failure" ] \
+            || { echo "::error::a padded load-shared resolved nothing and still passed"; exit 1; }
+
       - name: The action leaves nothing behind in the workspace
         run: |
           set -euo pipefail

@@ -210,6 +210,11 @@ runs:
         AM_BUILD_VARS_STORE_IN: ${{ steps.store.outputs.store-path }}
         AM_BUILD_VARS_STORE_OUT: ${{ runner.temp }}/am-build-vars-store-out
         AM_BUILD_VARS_STORE_RUN_ID: ${{ steps.store.outputs.run-id }}
+        # The backstop for the gate above. An expression has no trim(), so a
+        # padded 'load-shared' is false to that if: and true to truthy() -- the
+        # fetch is skipped while the resolver still believes sharing is on. The
+        # resolver refuses that combination rather than resolving nothing.
+        AM_BUILD_VARS_STORE_OUTCOME: ${{ steps.store.outcome }}
 
     # Writing the store is upload-artifact's job. Locating one to read is not
     # something it can do - it downloads by run, and which run published the

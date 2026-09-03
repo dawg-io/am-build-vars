@@ -32,6 +32,8 @@ Contract with action.yml (all values arrive as environment variables):
     AM_BUILD_VARS_STORE_IN      path to the store store.py downloaded, or empty
     AM_BUILD_VARS_STORE_OUT     directory to write the outgoing store into
     AM_BUILD_VARS_STORE_RUN_ID  the run the incoming store came from
+    AM_BUILD_VARS_STORE_OUTCOME the fetch step's outcome, so a fetch that was
+                                skipped while sharing is on is caught here
 
 Values are never printed. Key names and their source are, so a run is
 auditable without leaking anything the config file happens to contain.
@@ -267,6 +269,7 @@ def main():
     store_in = os.environ.get("AM_BUILD_VARS_STORE_IN", "").strip()
     store_out = os.environ.get("AM_BUILD_VARS_STORE_OUT", "").strip()
     store_run_id = os.environ.get("AM_BUILD_VARS_STORE_RUN_ID", "").strip()
+    store_outcome = os.environ.get("AM_BUILD_VARS_STORE_OUTCOME", "").strip()
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     github_env = os.environ.get("GITHUB_ENV")
@@ -276,6 +279,22 @@ def main():
         fail("GITHUB_OUTPUT is not set. This action must run inside GitHub Actions.")
     if export_env and not github_env:
         fail("GITHUB_ENV is not set. This action must run inside GitHub Actions.")
+
+    # The composite gates the fetch step on a workflow expression, and an
+    # expression cannot normalise a value the way truthy() does -- there is no
+    # trim() to call. So a padded value such as "load-shared: ' true '" is false
+    # to the gate and true here, and the step would otherwise exit 0 having
+    # silently resolved nothing. 'skipped' is the only outcome a step that did
+    # not run reports; a fetch that fails aborts the composite before this.
+    if store_outcome == "skipped" and (load_shared or share_input.strip() or share_env_input.strip()):
+        fail(
+            "This step asked for the shared store, but the composite action did "
+            "not fetch it -- the value of 'load-shared', 'share' or 'share-env' "
+            "was not recognised by the step's own condition. Surrounding "
+            "whitespace is the usual cause: write 'load-shared: true', not "
+            "'load-shared: \" true \"'. Failing here rather than resolving zero "
+            "shared keys and calling it a success."
+        )
 
     # --- defaults -----------------------------------------------------------
     defaults = render_layer(

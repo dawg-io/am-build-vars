@@ -45,6 +45,7 @@ run() {
     AM_BUILD_VARS_STORE_IN="${STORE_IN:-}" \
     AM_BUILD_VARS_STORE_OUT="${STORE_OUT:-}" \
     AM_BUILD_VARS_STORE_RUN_ID="${STORE_RUN_ID:-}" \
+    AM_BUILD_VARS_STORE_OUTCOME="${STORE_OUTCOME:-}" \
     python3 "$ROOT/scripts/resolve.py" 2>&1
   )"
   STATUS=$?
@@ -76,7 +77,7 @@ PY
 }
 
 reset_share() {
-  unset SHARE SHARE_ENV LOAD_SHARED SHARE_SCOPE STORE_IN STORE_OUT STORE_RUN_ID RUN_ID
+  unset SHARE SHARE_ENV LOAD_SHARED SHARE_SCOPE STORE_IN STORE_OUT STORE_RUN_ID RUN_ID STORE_OUTCOME
 }
 
 # stored <dir> <expr> — read something out of a store file the resolver wrote.
@@ -409,6 +410,39 @@ for spelling in false no 0 ""; do
   run "$FIXTURES/nope.yml" ""
   ok "load-shared=${spelling:-<empty>} ignores the store" "$(get "$OUT_FILE" shared-json)" "{}"
 done
+reset_share
+
+echo "27. a fetch that was skipped while sharing is on is an error, not a quiet zero"
+# The composite's if-gate is a workflow expression and has no trim(), so it reads
+# a padded 'load-shared' as false while truthy() reads it as true. Without this
+# guard the step exits 0 having resolved nothing at all.
+reset_share
+LOAD_SHARED=true STORE_OUTCOME=skipped
+run "$FIXTURES/nope.yml" ""
+ok "load-shared: exit status" "$STATUS" "1"
+contains "load-shared: names the inputs" "$LOG" "load-shared"
+reset_share
+SHARE=$'deploy_target: staging\n' STORE_OUTCOME=skipped STORE_OUT="$WORK/out27"
+run "$FIXTURES/nope.yml" ""
+# A producer here would publish a store built from nothing, erasing every key
+# another workflow had put there.
+ok "share: exit status" "$STATUS" "1"
+reset_share
+SHARE_ENV="captured_tag" STORE_OUTCOME=skipped
+run "$FIXTURES/nope.yml" ""
+ok "share-env: exit status" "$STATUS" "1"
+# The ordinary no-sharing path reports the same 'skipped' and must stay silent.
+reset_share
+STORE_OUTCOME=skipped
+run "$FIXTURES/basic.yml" ""
+ok "sharing off: exit status" "$STATUS" "0"
+ok "sharing off: still resolves" "$(get "$OUT_FILE" node_version)" "20"
+# And a fetch that really ran is unaffected.
+reset_share
+LOAD_SHARED=true STORE_OUTCOME=success STORE_IN="$FIXTURES/store-basic.json" STORE_RUN_ID=100
+run "$FIXTURES/nope.yml" ""
+ok "fetch ran: exit status" "$STATUS" "0"
+ok "fetch ran: store applied" "$(get "$OUT_FILE" image_tag)" "sha-abc1234"
 reset_share
 
 echo
