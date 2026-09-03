@@ -5,7 +5,10 @@ description: >-
 author: 'dawg-io'
 
 branding:
-  icon: 'sliders'
+  # The shield is the ActionsManager mark; purple sets this action apart from
+  # the rest of the family. Marketplace takes a Feather icon name only, so the
+  # brand's own artwork cannot be used here -- this is the nearest glyph.
+  icon: 'shield'
   color: 'purple'
 
 inputs:
