@@ -73,6 +73,18 @@ jobs:
                   if section == "outputs" and not (spec.get("value") or "").strip():
                       errors.append("outputs.{} has no value expression".format(key))
 
+          # Marketplace caps the description and refuses the listing above that --
+          # again at publish time, after the release is cut. The runner imposes no
+          # such limit, so nothing else in this repository catches an overlong one.
+          # The cap is exclusive: GitHub's own message is "must be less than 125".
+          DESCRIPTION_LIMIT = 125
+          action_description = " ".join((meta.get("description") or "").split())
+          if len(action_description) >= DESCRIPTION_LIMIT:
+              errors.append(
+                  "description is {} characters; Marketplace requires less than {}. "
+                  "Shorten it in action.yml -- the long form belongs in the "
+                  "README.".format(len(action_description), DESCRIPTION_LIMIT))
+
           # Marketplace refuses a listing whose branding it cannot render, and that
           # refusal arrives at publish time -- after the release is already cut.
           # Colours are a closed set of eight. Icons are Feather's set minus a
@@ -117,9 +129,11 @@ jobs:
               for err in errors:
                   print("::error file=action.yml::{}".format(err))
               sys.exit(1)
-          print("action.yml OK: {} inputs, {} outputs, branding {}/{}".format(
-              len(meta.get("inputs") or {}), len(meta.get("outputs") or {}),
-              branding["icon"], branding["color"]))
+          print("action.yml OK: {} inputs, {} outputs, branding {}/{}, "
+                "description {}/{} chars".format(
+                    len(meta.get("inputs") or {}), len(meta.get("outputs") or {}),
+                    branding["icon"], branding["color"],
+                    len(action_description), DESCRIPTION_LIMIT - 1))
           PY
 
       - name: Example config file is valid YAML

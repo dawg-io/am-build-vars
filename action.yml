@@ -1,15 +1,14 @@
 name: 'AM Build Vars'
 description: >-
-  Read per-repository build variables from a committed am-build-vars.yml file and
-  expose them to the rest of the job as environment variables and step outputs, with
-  inline fleet-wide defaults for any key the repository does not override. Lets one
-  byte-identical managed workflow produce different results per repository. Variables
-  computed during a run can also be published to a shared store and read back by a
-  later am-build-vars step in any other job or workflow.
+  Per-repository build variables from a committed file, exported as env vars and
+  shared across jobs, workflows and runs.
 author: 'dawg-io'
 
 branding:
-  icon: 'sliders'
+  # The shield is the ActionsManager mark; purple sets this action apart from
+  # the rest of the family. Marketplace takes a Feather icon name only, so the
+  # brand's own artwork cannot be used here -- this is the nearest glyph.
+  icon: 'shield'
   color: 'purple'
 
 inputs:
